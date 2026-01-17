@@ -33,6 +33,20 @@ conversation_history = {}
 # Format: {guild_id: [channel_id1, channel_id2, ...]}
 allowed_channels = {}
 
+# Available image generation models
+AVAILABLE_IMAGE_MODELS = {
+    "flux": "Flux (Default - Fast & Quality)",
+    "flux-pro": "Flux Pro (Higher Quality)",
+    "flux-realism": "Flux Realism (Photorealistic)",
+    "dalle": "DALL-E (OpenAI)",
+    "sdxl": "Stable Diffusion XL",
+    "playground-v2.5": "Playground v2.5"
+}
+
+# Store selected image model per guild (in-memory, resets on restart)
+# Format: {guild_id: model_name}
+image_models = {}
+
 # Flask app for health checks (keeps Render active)
 app = Flask(__name__)
 
@@ -67,12 +81,6 @@ async def on_ready():
     logger.info(f'Bot is in {len(bot.guilds)} guilds')
     # Start the keep-alive task
     bot.loop.create_task(keep_alive())
-    # Sync slash commands
-    try:
-        synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} slash command(s)")
-    except Exception as e:
-        logger.error(f"Failed to sync commands: {e}")
 
 async def keep_alive():
     """Self-ping to keep Render instance awake"""
@@ -112,6 +120,16 @@ async def on_message(message):
             # Channel restrictions exist, check if current channel is allowed
             if str(message.channel.id) not in allowed_channels[guild_id]:
                 return  # Ignore messages from non-allowed channels
+    
+    # Check if message has image attachments
+    if message.attachments:
+        # Check for image attachments
+        image_attachments = [att for att in message.attachments if att.content_type and att.content_type.startswith('image/')]
+        if image_attachments:
+            # Handle image with optional text prompt
+            prompt = message.content.strip() if message.content else "Describe this image"
+            await handle_image_analysis(message, image_attachments[0].url, prompt)
+            return
     
     # Only respond to messages starting with AI_PREFIX
     if message.content.startswith(AI_PREFIX):
@@ -171,24 +189,80 @@ async def handle_chat(message, prompt=None):
         logger.error(f"Chat error: {str(e)}")
         await message.reply(f"Sorry, I encountered an error: {str(e)}")
 
-async def handle_image_generation(message):
-    """Handle image generation with /imagine command"""
+async def handle_image_analysis(message, image_url, prompt):
+    """Handle image analysis with AI"""
     try:
-        # Extract prompt
-        prompt = message.content.replace('/imagine', '').strip()
-        
-        if not prompt:
-            await message.reply("Please provide a prompt! Example: `/imagine a beautiful sunset`")
-            return
-        
         # Show typing indicator
         async with message.channel.typing():
-            await message.reply(f"🎨 Generating image: *{prompt}*\nThis may take a moment...")
+            user_id = str(message.author.id)
+            
+            # Get or create conversation history for this user
+            if user_id not in conversation_history:
+                conversation_history[user_id] = []
+            
+            # Create message with image
+            user_message = {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": image_url}}
+                ]
+            }
+            
+            # Add to history
+            conversation_history[user_id].append(user_message)
+            
+            # Keep only last 10 messages
+            if len(conversation_history[user_id]) > 10:
+                conversation_history[user_id] = conversation_history[user_id][-10:]
+            
+            # Generate response using g4f with vision capability
+            response = await asyncio.to_thread(
+                g4f_client.chat.completions.create,
+                model="gpt-4-vision-preview",
+                messages=conversation_history[user_id]
+            )
+            
+            ai_response = response.choices[0].message.content
+            
+            # Add AI response to history
+            conversation_history[user_id].append({
+                "role": "assistant",
+                "content": ai_response
+            })
+            
+            # Split long messages if needed
+            if len(ai_response) > 2000:
+                chunks = [ai_response[i:i+2000] for i in range(0, len(ai_response), 2000)]
+                for chunk in chunks:
+                    await message.reply(chunk)
+            else:
+                await message.reply(ai_response)
+                
+    except Exception as e:
+        logger.error(f"Image analysis error: {str(e)}")
+        await message.reply(f"Sorry, I couldn't analyze that image: {str(e)}")
+
+@bot.command(name='imagine')
+async def imagine_command(ctx, *, prompt: str = None):
+    """Generate an image from text prompt"""
+    try:
+        if not prompt:
+            await ctx.reply("Please provide a prompt! Example: `!imagine a beautiful sunset`")
+            return
+        
+        # Get selected model for this guild
+        guild_id = str(ctx.guild.id) if ctx.guild else "dm"
+        selected_model = image_models.get(guild_id, "flux")
+        
+        # Show typing indicator
+        async with ctx.typing():
+            await ctx.reply(f"🎨 Generating image with **{AVAILABLE_IMAGE_MODELS.get(selected_model, selected_model)}**: *{prompt}*\nThis may take a moment...")
             
             # Generate image using g4f
             response = await asyncio.to_thread(
                 g4f_client.images.generate,
-                model="flux",
+                model=selected_model,
                 prompt=prompt
             )
             
@@ -204,17 +278,70 @@ async def handle_image_generation(message):
                         color=discord.Color.blue()
                     )
                     embed.set_image(url=image_url)
-                    embed.set_footer(text=f"Requested by {message.author.display_name}")
+                    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
                     
-                    await message.channel.send(embed=embed)
+                    await ctx.send(embed=embed)
                 else:
-                    await message.reply("Failed to generate image. Please try again.")
+                    await ctx.reply("Failed to generate image. Please try again.")
             else:
-                await message.reply("Failed to generate image. Please try again.")
+                await ctx.reply("Failed to generate image. Please try again.")
                 
     except Exception as e:
         logger.error(f"Image generation error: {str(e)}")
-        await message.reply(f"Sorry, I couldn't generate that image: {str(e)}")
+        await ctx.reply(f"Sorry, I couldn't generate that image: {str(e)}")
+
+@bot.command(name='ask')
+async def ask_command(ctx, *, question: str = None):
+    """Ask AI a question"""
+    if not question:
+        await ctx.reply("Please provide a question! Example: `!ask What is Python?`")
+        return
+    
+    try:
+        # Show typing indicator
+        async with ctx.typing():
+            user_id = str(ctx.author.id)
+            
+            # Get or create conversation history for this user
+            if user_id not in conversation_history:
+                conversation_history[user_id] = []
+            
+            # Add user message to history
+            conversation_history[user_id].append({
+                "role": "user",
+                "content": question
+            })
+            
+            # Keep only last 10 messages
+            if len(conversation_history[user_id]) > 10:
+                conversation_history[user_id] = conversation_history[user_id][-10:]
+            
+            # Generate response using g4f
+            response = await asyncio.to_thread(
+                g4f_client.chat.completions.create,
+                model="gpt-4",
+                messages=conversation_history[user_id]
+            )
+            
+            ai_response = response.choices[0].message.content
+            
+            # Add AI response to history
+            conversation_history[user_id].append({
+                "role": "assistant",
+                "content": ai_response
+            })
+            
+            # Split long messages (Discord has 2000 char limit)
+            if len(ai_response) > 2000:
+                chunks = [ai_response[i:i+2000] for i in range(0, len(ai_response), 2000)]
+                for chunk in chunks:
+                    await ctx.reply(chunk)
+            else:
+                await ctx.reply(ai_response)
+                
+    except Exception as e:
+        logger.error(f"Chat error: {str(e)}")
+        await ctx.reply(f"Sorry, I encountered an error: {str(e)}")
 
 @bot.command(name='clear')
 async def clear_history(ctx):
@@ -240,18 +367,18 @@ async def help_command(ctx):
         inline=False
     )
     embed.add_field(
-        name="⚡ Slash Commands",
-        value=(
-            "`/ask` - Ask AI a question\n"
-            "`/imagine` - Generate an image from text"
-        ),
+        name="📷 Image Analysis",
+        value="Upload an image with optional text to analyze it\nExample: Upload image + type 'What's in this image?'",
         inline=False
     )
     embed.add_field(
-        name="🔧 Bot Commands",
+        name="⚡ Commands",
         value=(
+            "`!ask <question>` - Ask AI a question\n"
+            "`!imagine <prompt>` - Generate an image from text\n"
             "`!clear` - Clear your conversation history\n"
             "`!ping` - Check bot latency\n"
+            "`!listimagemodels` - List available image models\n"
             "`!bothelp` - Show this message"
         ),
         inline=False
@@ -262,7 +389,8 @@ async def help_command(ctx):
             "`!setchannel` - Set current channel as active\n"
             "`!removechannel` - Remove current channel\n"
             "`!listchannels` - List active channels\n"
-            "`!clearallchannels` - Remove all restrictions"
+            "`!clearallchannels` - Remove all restrictions\n"
+            "`!setimagemodel <model>` - Set image generation model"
         ),
         inline=False
     )
@@ -274,94 +402,50 @@ async def ping(ctx):
     latency = round(bot.latency * 1000)
     await ctx.reply(f"🏓 Pong! Latency: {latency}ms")
 
-# Slash Commands
-@bot.tree.command(name="imagine", description="Generate an image from text prompt")
-async def imagine_slash(interaction: discord.Interaction, prompt: str):
-    """Generate image using AI"""
-    try:
-        await interaction.response.defer()
-        
-        await interaction.followup.send(f"🎨 Generating image: *{prompt}*\nThis may take a moment...")
-        
-        # Generate image using g4f
-        response = await asyncio.to_thread(
-            g4f_client.images.generate,
-            model="flux",
-            prompt=prompt
-        )
-        
-        # Get image URL
-        if response.data and len(response.data) > 0:
-            image_url = response.data[0].url if hasattr(response.data[0], 'url') else None
-            
-            if image_url:
-                # Create embed with image
-                embed = discord.Embed(
-                    title="Generated Image",
-                    description=prompt,
-                    color=discord.Color.blue()
-                )
-                embed.set_image(url=image_url)
-                embed.set_footer(text=f"Requested by {interaction.user.display_name}")
-                
-                await interaction.followup.send(embed=embed)
-            else:
-                await interaction.followup.send("Failed to generate image. Please try again.")
-        else:
-            await interaction.followup.send("Failed to generate image. Please try again.")
-            
-    except Exception as e:
-        logger.error(f"Image generation error: {str(e)}")
-        await interaction.followup.send(f"Sorry, I couldn't generate that image: {str(e)}")
 
-@bot.tree.command(name="ask", description="Ask AI a question")
-async def ask_slash(interaction: discord.Interaction, question: str):
-    """Ask AI a question using slash command"""
-    try:
-        await interaction.response.defer()
-        
-        user_id = str(interaction.user.id)
-        
-        # Get or create conversation history for this user
-        if user_id not in conversation_history:
-            conversation_history[user_id] = []
-        
-        # Add user message to history
-        conversation_history[user_id].append({
-            "role": "user",
-            "content": question
-        })
-        
-        # Keep only last 10 messages
-        if len(conversation_history[user_id]) > 10:
-            conversation_history[user_id] = conversation_history[user_id][-10:]
-        
-        # Generate response using g4f
-        response = await asyncio.to_thread(
-            g4f_client.chat.completions.create,
-            model="gpt-4",
-            messages=conversation_history[user_id]
+
+@bot.command(name='setimagemodel')
+@commands.has_permissions(manage_channels=True)
+async def set_image_model(ctx, model: str = None):
+    """Set the image generation model for this server (Admin only)"""
+    if not ctx.guild:
+        await ctx.reply("This command can only be used in a server!")
+        return
+    
+    if not model:
+        current_model = image_models.get(str(ctx.guild.id), "flux")
+        await ctx.reply(f"Current model: **{AVAILABLE_IMAGE_MODELS.get(current_model, current_model)}**\n\nUse `!listimagemodels` to see available models.")
+        return
+    
+    model = model.lower()
+    if model not in AVAILABLE_IMAGE_MODELS:
+        await ctx.reply(f"❌ Invalid model! Use `!listimagemodels` to see available models.")
+        return
+    
+    image_models[str(ctx.guild.id)] = model
+    await ctx.reply(f"✅ Image generation model set to: **{AVAILABLE_IMAGE_MODELS[model]}**")
+
+@bot.command(name='listimagemodels')
+async def list_image_models(ctx):
+    """List all available image generation models"""
+    guild_id = str(ctx.guild.id) if ctx.guild else "dm"
+    current_model = image_models.get(guild_id, "flux")
+    
+    embed = discord.Embed(
+        title="🎨 Available Image Generation Models",
+        description="Choose a model with `!setimagemodel <model>`",
+        color=discord.Color.purple()
+    )
+    
+    for model_key, model_name in AVAILABLE_IMAGE_MODELS.items():
+        indicator = "✅ (Current)" if model_key == current_model else ""
+        embed.add_field(
+            name=f"{model_name} {indicator}",
+            value=f"Command: `!setimagemodel {model_key}`",
+            inline=False
         )
-        
-        ai_response = response.choices[0].message.content
-        
-        # Add AI response to history
-        conversation_history[user_id].append({
-            "role": "assistant",
-            "content": ai_response
-        })
-        
-        # Split long messages (Discord has 2000 char limit)
-        if len(ai_response) > 2000:
-            chunks = [ai_response[i:i+2000] for i in range(0, len(ai_response), 2000)]
-            for chunk in chunks:
-                await interaction.followup.send(chunk)
-        else:
-            await interaction.followup.send(ai_response)
-            
-    except Exception as e:
-        logger.error(f"Chat error: {str(e)}")
-        await interaction.followup.send(f"Sorry, I encountered an error: {str(e)}")
+    
+    await ctx.reply(embed=embed)
 
 @bot.command(name='setchannel')
 @commands.has_permissions(manage_channels=True)
@@ -447,6 +531,7 @@ async def clear_all_channels(ctx):
 @remove_channel.error
 @list_channels.error
 @clear_all_channels.error
+@set_image_model.error
 async def channel_command_error(ctx, error):
     """Handle permission errors for channel commands"""
     if isinstance(error, commands.MissingPermissions):
