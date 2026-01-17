@@ -5,7 +5,7 @@ from g4f.client import Client
 import os
 import logging
 import asyncio
-from flask import Flask
+from flask import Flask, jsonify
 from threading import Thread
 import requests
 from datetime import datetime
@@ -14,22 +14,38 @@ from datetime import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Initialize bot first
+intents = discord.Intents.default()
+intents.message_content = True
+intents.messages = True
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Initialize g4f client
+g4f_client = Client()
+
+# Store conversation history (in-memory, resets on restart)
+conversation_history = {}
+
+# Store allowed channels per guild (in-memory, resets on restart)
+# Format: {guild_id: [channel_id1, channel_id2, ...]}
+allowed_channels = {}
+
 # Flask app for health checks (keeps Render active)
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return {
+    return jsonify({
         'status': 'online',
         'bot': bot.user.name if bot.user else 'connecting',
-        'guilds': len(bot.guilds),
+        'guilds': len(bot.guilds) if bot.is_ready() else 0,
         'latency': round(bot.latency * 1000) if bot.is_ready() else 0,
         'timestamp': datetime.utcnow().isoformat()
-    }
+    })
 
 @app.route('/health')
 def health():
-    return {'status': 'healthy', 'bot_ready': bot.is_ready()}
+    return jsonify({'status': 'healthy', 'bot_ready': bot.is_ready()})
 
 def run_flask():
     """Run Flask server in a separate thread"""
@@ -41,18 +57,6 @@ def start_flask():
     thread = Thread(target=run_flask, daemon=True)
     thread.start()
     logger.info("Flask health server started")
-
-# Initialize bot
-intents = discord.Intents.default()
-intents.message_content = True
-intents.messages = True
-bot = commands.Bot(command_prefix='!', intents=intents)
-
-# Initialize g4f client
-g4f_client = Client()
-
-# Store conversation history (in-memory, resets on restart)
-conversation_history = {}
 
 @bot.event
 async def on_ready():
@@ -91,6 +95,14 @@ async def on_message(message):
     # If message starts with !, it's a command, so skip
     if message.content.startswith('!'):
         return
+    
+    # Check if channel restrictions are enabled for this guild
+    if message.guild:
+        guild_id = str(message.guild.id)
+        if guild_id in allowed_channels and allowed_channels[guild_id]:
+            # Channel restrictions exist, check if current channel is allowed
+            if str(message.channel.id) not in allowed_channels[guild_id]:
+                return  # Ignore messages from non-allowed channels
     
     # Handle /imagine for image generation
     if message.content.startswith('/imagine'):
@@ -223,13 +235,22 @@ async def help_command(ctx):
         inline=False
     )
     embed.add_field(
-        name="🗑️ Clear History",
-        value="`!clear` - Clear your conversation history",
+        name="� Commands",
+        value=(
+            "`!clear` - Clear your conversation history\n"
+            "`!ping` - Check bot latency\n"
+            "`!help` - Show this message"
+        ),
         inline=False
     )
     embed.add_field(
-        name="❓ Help",
-        value="`!help` - Show this message",
+        name="🔒 Admin Commands",
+        value=(
+            "`!setchannel` - Set current channel as active\n"
+            "`!removechannel` - Remove current channel\n"
+            "`!listchannels` - List active channels\n"
+            "`!clearallchannels` - Remove all restrictions"
+        ),
         inline=False
     )
     await ctx.reply(embed=embed)
@@ -239,6 +260,95 @@ async def ping(ctx):
     """Check bot latency"""
     latency = round(bot.latency * 1000)
     await ctx.reply(f"🏓 Pong! Latency: {latency}ms")
+
+@bot.command(name='setchannel')
+@commands.has_permissions(manage_channels=True)
+async def set_channel(ctx):
+    """Set the current channel as allowed for bot responses (Admin only)"""
+    if not ctx.guild:
+        await ctx.reply("This command can only be used in a server!")
+        return
+    
+    guild_id = str(ctx.guild.id)
+    channel_id = str(ctx.channel.id)
+    
+    # Initialize guild's allowed channels if not exists
+    if guild_id not in allowed_channels:
+        allowed_channels[guild_id] = []
+    
+    # Add channel if not already in list
+    if channel_id not in allowed_channels[guild_id]:
+        allowed_channels[guild_id].append(channel_id)
+        await ctx.reply(f"✅ Bot is now active in {ctx.channel.mention}!")
+    else:
+        await ctx.reply(f"ℹ️ This channel is already active!")
+
+@bot.command(name='removechannel')
+@commands.has_permissions(manage_channels=True)
+async def remove_channel(ctx):
+    """Remove the current channel from allowed list (Admin only)"""
+    if not ctx.guild:
+        await ctx.reply("This command can only be used in a server!")
+        return
+    
+    guild_id = str(ctx.guild.id)
+    channel_id = str(ctx.channel.id)
+    
+    if guild_id in allowed_channels and channel_id in allowed_channels[guild_id]:
+        allowed_channels[guild_id].remove(channel_id)
+        await ctx.reply(f"❌ Bot will no longer respond in {ctx.channel.mention}")
+    else:
+        await ctx.reply(f"ℹ️ This channel wasn't active anyway!")
+
+@bot.command(name='listchannels')
+@commands.has_permissions(manage_channels=True)
+async def list_channels(ctx):
+    """List all allowed channels in this server (Admin only)"""
+    if not ctx.guild:
+        await ctx.reply("This command can only be used in a server!")
+        return
+    
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in allowed_channels or not allowed_channels[guild_id]:
+        await ctx.reply("ℹ️ No channel restrictions set. Bot responds in all channels!")
+        return
+    
+    channels_list = []
+    for channel_id in allowed_channels[guild_id]:
+        channel = ctx.guild.get_channel(int(channel_id))
+        if channel:
+            channels_list.append(channel.mention)
+    
+    if channels_list:
+        await ctx.reply(f"✅ **Active Channels:**\n" + "\n".join(channels_list))
+    else:
+        await ctx.reply("ℹ️ No valid channels found in the list!")
+
+@bot.command(name='clearallchannels')
+@commands.has_permissions(manage_channels=True)
+async def clear_all_channels(ctx):
+    """Remove all channel restrictions (Admin only)"""
+    if not ctx.guild:
+        await ctx.reply("This command can only be used in a server!")
+        return
+    
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id in allowed_channels:
+        allowed_channels[guild_id] = []
+        await ctx.reply("✅ All channel restrictions removed! Bot now responds in all channels.")
+    else:
+        await ctx.reply("ℹ️ No restrictions were set!")
+
+@set_channel.error
+@remove_channel.error
+@list_channels.error
+@clear_all_channels.error
+async def channel_command_error(ctx, error):
+    """Handle permission errors for channel commands"""
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.reply("❌ You need **Manage Channels** permission to use this command!")
 
 # Run the bot
 if __name__ == "__main__":
