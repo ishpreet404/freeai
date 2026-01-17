@@ -1,0 +1,287 @@
+{
+  "name": "Discord AI Bot with g4f",
+  "nodes": [
+    {
+      "parameters": {
+        "authentication": "botToken",
+        "resource": "message",
+        "events": [
+          "messageCreate"
+        ]
+      },
+      "id": "discord-trigger",
+      "name": "Discord Trigger",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "discord-bot",
+      "credentials": {
+        "discordBotApi": {
+          "id": "1",
+          "name": "Discord Bot API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "1",
+              "leftValue": "={{ $json.content }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            },
+            {
+              "id": "2",
+              "leftValue": "={{ $json.author.bot }}",
+              "rightValue": "false",
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "3",
+              "leftValue": "={{ $json.content }}",
+              "rightValue": "/imagine",
+              "operator": {
+                "type": "string",
+                "operation": "startsWith"
+              }
+            }
+          ]
+        }
+      },
+      "id": "check-image-command",
+      "name": "Check if Image Command",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "YOUR_API_URL/image",
+        "authentication": "none",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "prompt",
+              "value": "={{ $json.content.replace('/imagine ', '').trim() }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "call-image-api",
+      "name": "Generate Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "YOUR_API_URL/chat",
+        "authentication": "none",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "message",
+              "value": "={{ $json.content }}"
+            },
+            {
+              "name": "model",
+              "value": "gpt-4"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "call-chat-api",
+      "name": "Generate Chat Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 400]
+    },
+    {
+      "parameters": {
+        "authentication": "botToken",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "={{ $('Discord Trigger').item.json.channel_id }}",
+        "content": "={{ $json.response }}"
+      },
+      "id": "send-chat-response",
+      "name": "Send Chat Response",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [900, 400],
+      "credentials": {
+        "discordBotApi": {
+          "id": "1",
+          "name": "Discord Bot API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "botToken",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "={{ $('Discord Trigger').item.json.channel_id }}",
+        "content": "Here's your generated image!",
+        "additionalFields": {
+          "embeds": {
+            "embedsValues": [
+              {
+                "title": "Generated Image",
+                "description": "={{ $('Discord Trigger').item.json.content.replace('/imagine ', '').trim() }}",
+                "image": {
+                  "url": "={{ $json.image_url }}"
+                }
+              }
+            ]
+          }
+        }
+      },
+      "id": "send-image-response",
+      "name": "Send Image Response",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [900, 200],
+      "credentials": {
+        "discordBotApi": {
+          "id": "1",
+          "name": "Discord Bot API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {},
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "1",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": "true",
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "check-image-success",
+      "name": "Check Image Success",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 100]
+    },
+    {
+      "parameters": {
+        "authentication": "botToken",
+        "resource": "message",
+        "operation": "send",
+        "channelId": "={{ $('Discord Trigger').item.json.channel_id }}",
+        "content": "Sorry, I couldn't generate that image. Please try again with a different prompt."
+      },
+      "id": "send-error-message",
+      "name": "Send Error Message",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [1120, 80],
+      "credentials": {
+        "discordBotApi": {
+          "id": "1",
+          "name": "Discord Bot API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Discord Trigger": {
+      "main": [
+        [
+          {
+            "node": "Check if Image Command",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check if Image Command": {
+      "main": [
+        [
+          {
+            "node": "Generate Image",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Generate Chat Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Image": {
+      "main": [
+        [
+          {
+            "node": "Check Image Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Chat Response": {
+      "main": [
+        [
+          {
+            "node": "Send Chat Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Image Success": {
+      "main": [
+        [
+          {
+            "node": "Send Image Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Error Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {}
+}
