@@ -148,10 +148,17 @@ async def on_voice_state_update(member, before, after):
         logger.info(f"Bot left voice channel in guild {guild_id}")
         cleanup_voice_client(guild_id)
     
-    # Bot joined voice channel
+    # Bot joined or moved to a voice channel
     elif not before.channel and after.channel:
         logger.info(f"Bot joined voice channel in guild {guild_id}")
         # Sync our cache with actual state
+        if member.guild.voice_client:
+            voice_clients[guild_id] = member.guild.voice_client
+    
+    # Bot moved between channels
+    elif before.channel and after.channel and before.channel.id != after.channel.id:
+        logger.info(f"Bot moved from {before.channel.name} to {after.channel.name} in guild {guild_id}")
+        # Update cache
         if member.guild.voice_client:
             voice_clients[guild_id] = member.guild.voice_client
 
@@ -451,21 +458,47 @@ async def speak_command(ctx, *, text: str = None):
         await ctx.reply("Please provide text! Example: `!speak Hello, how are you?`")
         return
     
+    # List of backup voices in case primary fails
+    voices_to_try = [
+        "en-IN-NeerjaNeural",  # Indian female (primary)
+        "en-US-JennyNeural",    # US female (backup)
+        "en-GB-SoniaNeural"     # UK female (backup)
+    ]
+    
+    tmp_filename = None
     try:
         async with ctx.typing():
-            # Generate speech with Edge TTS
-            communicate = edge_tts.Communicate(text, TTS_VOICE)
+            last_error = None
             
-            # Save to temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
-                tmp_filename = tmp_file.name
-                await communicate.save(tmp_filename)
+            # Try each voice until one works
+            for voice in voices_to_try:
+                try:
+                    # Generate speech with Edge TTS
+                    communicate = edge_tts.Communicate(text, voice)
+                    
+                    # Save to temporary file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                        tmp_filename = tmp_file.name
+                        await communicate.save(tmp_filename)
+                    
+                    # Send audio file
+                    voice_label = "🔊" if voice == voices_to_try[0] else "🔊 (backup voice)"
+                    await ctx.reply(f"{voice_label} Here's your audio:", file=discord.File(tmp_filename, "speech.mp3"))
+                    
+                    # Clean up and return on success
+                    if tmp_filename and os.path.exists(tmp_filename):
+                        os.unlink(tmp_filename)
+                    return
+                    
+                except Exception as voice_error:
+                    logger.warning(f"Failed with voice {voice}: {str(voice_error)}")
+                    last_error = voice_error
+                    if tmp_filename and os.path.exists(tmp_filename):
+                        os.unlink(tmp_filename)
+                    continue
             
-            # Send audio file
-            await ctx.reply("🔊 Here's your audio:", file=discord.File(tmp_filename, "speech.mp3"))
-            
-            # Clean up
-            os.unlink(tmp_filename)
+            # If all voices failed
+            raise last_error if last_error else Exception("All voices failed")
             
     except Exception as e:
         logger.error(f"TTS error: {str(e)}")
@@ -547,14 +580,16 @@ async def listen_command(ctx, duration: int = 5):
         await ctx.reply("❌ Bot must be in voice channel! Use `!join` first.")
         return
     
+    if not voice_client.is_connected():
+        await ctx.reply("❌ Bot is not properly connected to voice! Use `!leave` then `!join` again.")
+        cleanup_voice_client(guild_id)
+        return
+    
     if duration > 30:
         duration = 30
         
     try:
         await ctx.reply(f"🎤 Listening for {duration} seconds...")
-        
-        # Create a sink to record audio
-        voice_client = voice_clients[guild_id]
         
         # Note: Discord.py voice recording is complex and requires additional setup
         # For Render free tier, we'll use a simpler approach with audio attachments
@@ -882,7 +917,13 @@ async def search_movie(ctx, *, query: str = None):
                 await ctx.reply(f"❌ No movies found for: {query}")
                 return
             
-            movie = results[0]
+            # Convert results to list and get first movie
+            results_list = list(results)
+            if not results_list:
+                await ctx.reply(f"❌ No movies found for: {query}")
+                return
+            
+            movie = results_list[0]
             movie_details = movie_api.details(movie.id)
             
             # Get external IDs for IMDb
@@ -890,9 +931,13 @@ async def search_movie(ctx, *, query: str = None):
             imdb_id = external_ids.get('imdb_id', None)
             
             # Create embed
+            release_year = movie_details.release_date[:4] if hasattr(movie_details, 'release_date') and movie_details.release_date else 'N/A'
+            overview = movie_details.overview if hasattr(movie_details, 'overview') else "No overview available."
+            description = overview[:300] + "..." if len(overview) > 300 else overview
+            
             embed = discord.Embed(
-                title=f"{movie_details.title} ({movie_details.release_date[:4] if movie_details.release_date else 'N/A'})",
-                description=movie_details.overview[:300] + "..." if len(movie_details.overview) > 300 else movie_details.overview,
+                title=f"{movie_details.title} ({release_year})",
+                description=description,
                 color=discord.Color.blue(),
                 url=f"https://www.themoviedb.org/movie/{movie.id}"
             )
@@ -901,10 +946,16 @@ async def search_movie(ctx, *, query: str = None):
             if movie_details.poster_path:
                 embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w500{movie_details.poster_path}")
             
-            # Add fields
+            # Add fields - safely handle genres
             embed.add_field(name="⭐ Rating", value=f"{movie_details.vote_average:.1f}/10", inline=True)
             embed.add_field(name="🎬 Runtime", value=f"{movie_details.runtime} min" if movie_details.runtime else "N/A", inline=True)
-            embed.add_field(name="🎭 Genres", value=", ".join([g.name for g in movie_details.genres[:3]]) if movie_details.genres else "N/A", inline=True)
+            
+            # Get genres safely
+            genres_text = "N/A"
+            if hasattr(movie_details, 'genres') and movie_details.genres:
+                genres_list = list(movie_details.genres)
+                genres_text = ", ".join([g.name for g in genres_list[:3]])
+            embed.add_field(name="🎭 Genres", value=genres_text, inline=True)
             
             # Create buttons for streaming providers
             view = discord.ui.View()
@@ -941,7 +992,13 @@ async def search_tv(ctx, *, query: str = None):
                 await ctx.reply(f"❌ No TV shows found for: {query}")
                 return
             
-            show = results[0]
+            # Convert results to list and get first show
+            results_list = list(results)
+            if not results_list:
+                await ctx.reply(f"❌ No TV shows found for: {query}")
+                return
+            
+            show = results_list[0]
             show_details = tv_api.details(show.id)
             
             # Get external IDs for IMDb
@@ -964,7 +1021,13 @@ async def search_tv(ctx, *, query: str = None):
             embed.add_field(name="⭐ Rating", value=f"{show_details.vote_average:.1f}/10", inline=True)
             embed.add_field(name="📺 Seasons", value=str(show_details.number_of_seasons), inline=True)
             embed.add_field(name="🎬 Episodes", value=str(show_details.number_of_episodes), inline=True)
-            embed.add_field(name="🎭 Genres", value=", ".join([g.name for g in show_details.genres[:3]]) if show_details.genres else "N/A", inline=True)
+            
+            # Get genres safely
+            genres_text = "N/A"
+            if hasattr(show_details, 'genres') and show_details.genres:
+                genres_list = list(show_details.genres)
+                genres_text = ", ".join([g.name for g in genres_list[:3]])
+            embed.add_field(name="🎭 Genres", value=genres_text, inline=True)
             embed.add_field(name="📅 Status", value=show_details.status, inline=True)
             
             # Default to Season 1 Episode 1
