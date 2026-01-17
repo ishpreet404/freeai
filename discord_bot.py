@@ -397,71 +397,125 @@ async def imagine_command(ctx, *, prompt: str = None):
         MAX_FILE_SIZE = 8 * 1024 * 1024  # 8 MB in bytes
         
         # Show typing indicator
-        status_msg = await ctx.reply(f"🎨 Generating image with **{AVAILABLE_IMAGE_MODELS.get(selected_model, selected_model)}**\n> _{prompt}_\n\n⏳ Processing...")
+        status_msg = await ctx.reply(f"🎨 Generating images with **{AVAILABLE_IMAGE_MODELS.get(selected_model, selected_model)}**\n> _{prompt}_\n\n⏳ Trying multiple providers...")
         
         try:
-            # Create a synchronous wrapper function
-            def generate_image():
+            # Import providers
+            from g4f.Provider import Blackbox, PollinationsAI, Airforce
+            
+            # Define providers to try for each model
+            provider_map = {
+                'flux': [Blackbox, PollinationsAI, Airforce],
+                'flux-pro': [Blackbox, Airforce, PollinationsAI],
+                'flux-realism': [Blackbox, PollinationsAI, Airforce],
+                'sdxl': [PollinationsAI, Airforce, Blackbox],
+                'playground-v2.5': [Airforce, Blackbox, PollinationsAI],
+                'dalle': [Airforce, Blackbox, PollinationsAI]
+            }
+            
+            # Get providers for selected model
+            providers_to_try = provider_map.get(selected_model, [Blackbox, PollinationsAI, Airforce])
+            
+            # Function to generate image with a specific provider
+            def generate_with_provider(provider):
                 try:
-                    logger.info(f"Generating image with model: {selected_model}, prompt: {prompt}")
+                    provider_name = provider.__name__
+                    logger.info(f"Trying provider: {provider_name} for model: {selected_model}")
                     response = g4f_client.images.generate(
                         model=selected_model,
-                        prompt=prompt
+                        prompt=prompt,
+                        provider=provider
                     )
-                    logger.info(f"Response type: {type(response)}")
-                    return response
-                except Exception as inner_e:
-                    logger.error(f"Inner generation error: {str(inner_e)}", exc_info=True)
-                    return None
+                    logger.info(f"Success with {provider_name}")
+                    return (provider_name, response)
+                except Exception as e:
+                    logger.warning(f"Provider {provider.__name__} failed: {str(e)}")
+                    return (provider.__name__, None)
             
-            # Run in thread pool
-            response = await asyncio.get_event_loop().run_in_executor(None, generate_image)
+            # Try all providers in parallel
+            tasks = [asyncio.get_event_loop().run_in_executor(None, generate_with_provider, provider) 
+                     for provider in providers_to_try]
+            results = await asyncio.gather(*tasks)
             
-            # Check if response is valid
-            if response is None:
-                await status_msg.edit(content=f"❌ Image generation failed with **{selected_model}** model.\n\n💡 Try another model: `!listimagemodels`")
+            # Filter successful results
+            successful_results = [(name, resp) for name, resp in results if resp is not None]
+            
+            if not successful_results:
+                await status_msg.edit(content=f"❌ All providers failed for **{selected_model}** model.\n\n💡 Try another model: `!listimagemodels`")
                 return
-                
-            # Get image URL or data from response
-            image_url = None
-            image_data = None
             
-            # Try different response formats
-            logger.info(f"Parsing response type: {type(response)}")
+            # Update status
+            provider_count = len(successful_results)
+            await status_msg.edit(content=f"✅ Generated {provider_count} image(s) from {provider_count} provider(s)!\n⏳ Downloading...")
+            # Update status
+            provider_count = len(successful_results)
+            await status_msg.edit(content=f"✅ Generated {provider_count} image(s) from {provider_count} provider(s)!\n⏳ Downloading...")
+                
+            # Process each successful response
+            images_to_send = []
             
-            if hasattr(response, 'data') and response.data:
-                logger.info(f"Response has data attribute with {len(response.data)} items")
-                if len(response.data) > 0:
-                    first_item = response.data[0]
-                    logger.info(f"First item type: {type(first_item)}")
-                    if hasattr(first_item, 'url'):
-                        image_url = first_item.url
-                        logger.info(f"Got URL: {image_url[:50]}...")
-                    elif isinstance(first_item, str):
-                        image_url = first_item
-                        logger.info(f"Got URL string: {image_url[:50]}...")
-                    elif hasattr(first_item, 'b64_json'):
-                        import base64
-                        image_data = base64.b64decode(first_item.b64_json)
-                        logger.info(f"Got base64 data: {len(image_data)} bytes")
-            elif isinstance(response, str):
-                image_url = response
-                logger.info(f"Response is string URL: {image_url[:50]}...")
-            elif isinstance(response, bytes):
-                image_data = response
-                logger.info(f"Response is bytes: {len(image_data)} bytes")
+            for provider_name, response in successful_results:
+                # Get image URL or data from response
+                image_url = None
+                image_data = None
                 
-            # If we have image data (not URL), check size and compress if needed
-            if image_data:
-                size_mb = len(image_data) / (1024 * 1024)
-                logger.info(f"Image data size: {size_mb:.2f}MB")
+                # Try different response formats
+                logger.info(f"Parsing response from {provider_name}, type: {type(response)}")
                 
-                if len(image_data) > MAX_FILE_SIZE:
-                    await status_msg.edit(content=f"🎨 Image generated! Compressing ({size_mb:.1f}MB → 8MB)...")
-                    image_data = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_data)
-                    new_size_mb = len(image_data) / (1024 * 1024)
-                    logger.info(f"Compressed to {new_size_mb:.2f}MB")
-                
+                if hasattr(response, 'data') and response.data:
+                    if len(response.data) > 0:
+                        first_item = response.data[0]
+                        if hasattr(first_item, 'url'):
+                            image_url = first_item.url
+                        elif isinstance(first_item, str):
+                            image_url = first_item
+                        elif hasattr(first_item, 'b64_json'):
+                            import base64
+                            image_data = base64.b64decode(first_item.b64_json)
+                elif isinstance(response, str):
+                    image_url = response
+                elif isinstance(response, bytes):
+                    image_data = response
+                    
+                # If we have image data directly
+                if image_data:
+                    size_mb = len(image_data) / (1024 * 1024)
+                    logger.info(f"Image data from {provider_name}: {size_mb:.2f}MB")
+                    
+                    if len(image_data) > MAX_FILE_SIZE:
+                        image_data = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_data)
+                    
+                    images_to_send.append((provider_name, image_data))
+                    
+                # If we have a URL, download it
+                elif image_url:
+                    try:
+                        def download_image():
+                            resp = requests.get(image_url, timeout=30)
+                            resp.raise_for_status()
+                            return resp.content
+                        
+                        image_bytes = await asyncio.get_event_loop().run_in_executor(None, download_image)
+                        logger.info(f"Downloaded {len(image_bytes)} bytes from {provider_name}")
+                        
+                        # Check size and compress if needed
+                        if len(image_bytes) > MAX_FILE_SIZE:
+                            image_bytes = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_bytes)
+                        
+                        images_to_send.append((provider_name, image_bytes))
+                    except Exception as download_error:
+                        logger.error(f"Download error from {provider_name}: {str(download_error)}")
+                        continue
+            
+            # Send all images
+            if not images_to_send:
+                await status_msg.edit(content=f"❌ Could not process any images.\n\n💡 Try another model: `!listimagemodels`")
+                return
+            
+            # Create embeds and files for all images
+            if len(images_to_send) == 1:
+                # Single image - send with embed
+                provider_name, image_data = images_to_send[0]
                 file = discord.File(io.BytesIO(image_data), filename="generated_image.jpg")
                 embed = discord.Embed(
                     title="🎨 Generated Image",
@@ -469,63 +523,23 @@ async def imagine_command(ctx, *, prompt: str = None):
                     color=discord.Color.green()
                 )
                 embed.set_image(url="attachment://generated_image.jpg")
-                embed.set_footer(text=f"Requested by {ctx.author.display_name} • Model: {selected_model}")
+                embed.set_footer(text=f"Requested by {ctx.author.display_name} • Model: {selected_model} • Provider: {provider_name}")
                 await ctx.send(embed=embed, file=file)
-                await status_msg.delete()
-                return
-                
-            # If we have a URL, try to download and send as file (more reliable)
-            if image_url:
-                try:
-                    await status_msg.edit(content="🎨 Image generated! Downloading...")
-                    
-                    # Download the image
-                    def download_image():
-                        logger.info(f"Downloading image from: {image_url[:100]}...")
-                        resp = requests.get(image_url, timeout=30)
-                        resp.raise_for_status()
-                        return resp.content
-                    
-                    image_bytes = await asyncio.get_event_loop().run_in_executor(None, download_image)
-                    logger.info(f"Downloaded {len(image_bytes)} bytes")
-                    
-                    # Check size and compress if needed
-                    size_mb = len(image_bytes) / (1024 * 1024)
-                    if len(image_bytes) > MAX_FILE_SIZE:
-                        await status_msg.edit(content=f"🎨 Image downloaded! Compressing ({size_mb:.1f}MB → 8MB)...")
-                        image_bytes = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_bytes)
-                        new_size_mb = len(image_bytes) / (1024 * 1024)
-                        logger.info(f"Compressed to {new_size_mb:.2f}MB")
-                    
-                    # Send as file attachment
-                    file = discord.File(io.BytesIO(image_bytes), filename="generated_image.jpg")
-                    embed = discord.Embed(
-                        title="🎨 Generated Image",
-                        description=f"> {prompt}",
-                        color=discord.Color.green()
-                    )
-                    embed.set_image(url="attachment://generated_image.jpg")
-                    embed.set_footer(text=f"Requested by {ctx.author.display_name} • Model: {selected_model}")
-                    await ctx.send(embed=embed, file=file)
-                    await status_msg.delete()
-                except Exception as download_error:
-                    logger.error(f"Download error: {str(download_error)}", exc_info=True)
-                    # Fallback: try sending URL directly
-                    try:
-                        embed = discord.Embed(
-                            title="🎨 Generated Image",
-                            description=f"> {prompt}",
-                            color=discord.Color.green()
-                        )
-                        embed.set_image(url=image_url)
-                        embed.set_footer(text=f"Requested by {ctx.author.display_name} • Model: {selected_model}")
-                        await ctx.send(embed=embed)
-                        await status_msg.delete()
-                    except Exception as embed_error:
-                        logger.error(f"Embed error: {str(embed_error)}")
-                        await status_msg.edit(content=f"❌ Failed to send image. URL: {image_url}")
             else:
-                await status_msg.edit(content=f"❌ Could not extract image from response.\n\n💡 Try: `!setimagemodel flux` or `!listimagemodels`")
+                # Multiple images - send all at once
+                files = []
+                for i, (provider_name, image_data) in enumerate(images_to_send, 1):
+                    files.append(discord.File(io.BytesIO(image_data), filename=f"image_{i}_{provider_name}.jpg"))
+                
+                embed = discord.Embed(
+                    title=f"🎨 Generated {len(images_to_send)} Images",
+                    description=f"> {prompt}\n\n**Providers:** {', '.join([name for name, _ in images_to_send])}",
+                    color=discord.Color.green()
+                )
+                embed.set_footer(text=f"Requested by {ctx.author.display_name} • Model: {selected_model}")
+                await ctx.send(embed=embed, files=files)
+            
+            await status_msg.delete()
                     
         except Exception as gen_error:
             logger.error(f"Generation wrapper error: {str(gen_error)}", exc_info=True)
