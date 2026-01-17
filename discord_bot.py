@@ -953,8 +953,18 @@ async def search_movie(ctx, *, query: str = None):
             # Get genres safely
             genres_text = "N/A"
             if hasattr(movie_details, 'genres') and movie_details.genres:
-                genres_list = list(movie_details.genres)
-                genres_text = ", ".join([g.name for g in genres_list[:3]])
+                try:
+                    genres_list = list(movie_details.genres)
+                    # Handle both dict and object formats
+                    genre_names = []
+                    for g in genres_list[:3]:
+                        if isinstance(g, dict):
+                            genre_names.append(g.get('name', ''))
+                        elif hasattr(g, 'name'):
+                            genre_names.append(g.name)
+                    genres_text = ", ".join(genre_names) if genre_names else "N/A"
+                except Exception as e:
+                    logger.warning(f"Error processing genres: {e}")
             embed.add_field(name="🎭 Genres", value=genres_text, inline=True)
             
             # Create buttons for streaming providers
@@ -1025,8 +1035,18 @@ async def search_tv(ctx, *, query: str = None):
             # Get genres safely
             genres_text = "N/A"
             if hasattr(show_details, 'genres') and show_details.genres:
-                genres_list = list(show_details.genres)
-                genres_text = ", ".join([g.name for g in genres_list[:3]])
+                try:
+                    genres_list = list(show_details.genres)
+                    # Handle both dict and object formats
+                    genre_names = []
+                    for g in genres_list[:3]:
+                        if isinstance(g, dict):
+                            genre_names.append(g.get('name', ''))
+                        elif hasattr(g, 'name'):
+                            genre_names.append(g.name)
+                    genres_text = ", ".join(genre_names) if genre_names else "N/A"
+                except Exception as e:
+                    logger.warning(f"Error processing genres: {e}")
             embed.add_field(name="🎭 Genres", value=genres_text, inline=True)
             embed.add_field(name="📅 Status", value=show_details.status, inline=True)
             
