@@ -17,6 +17,7 @@ import tempfile
 from collections import deque
 import re
 from tmdbv3api import TMDb, Movie, TV
+from PIL import Image
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -201,15 +202,19 @@ async def on_message(message):
             if str(message.channel.id) not in allowed_channels[guild_id]:
                 return  # Ignore messages from non-allowed channels
     
-    # Check if message has image attachments
-    if message.attachments:
-        # Check for image attachments
-        image_attachments = [att for att in message.attachments if att.content_type and att.content_type.startswith('image/')]
-        if image_attachments:
-            # Handle image with optional text prompt
-            prompt = message.content.strip() if message.content else "Describe this image"
-            await handle_image_analysis(message, image_attachments[0].url, prompt)
-            return
+    # Check if bot is mentioned or replied to
+    is_mentioned = bot.user in message.mentions
+    is_reply_to_bot = message.reference and message.reference.resolved and message.reference.resolved.author == bot.user
+    
+    # If bot is mentioned or replied to, treat the message as a prompt
+    if is_mentioned or is_reply_to_bot:
+        # Remove bot mention from content if present
+        prompt = message.content
+        if is_mentioned:
+            prompt = prompt.replace(f'<@{bot.user.id}>', '').replace(f'<@!{bot.user.id}>', '').strip()
+        if prompt:
+            await handle_chat(message, prompt)
+        return
     
     # Only respond to messages starting with AI_PREFIX
     if message.content.startswith(AI_PREFIX):
@@ -323,6 +328,58 @@ async def handle_image_analysis(message, image_url, prompt):
         logger.error(f"Image analysis error: {str(e)}")
         await message.reply(f"Sorry, I couldn't analyze that image: {str(e)}")
 
+def compress_image(image_bytes, max_size_mb=8):
+    """Compress image if it exceeds Discord's size limit"""
+    max_size_bytes = max_size_mb * 1024 * 1024
+    
+    # If already under limit, return as-is
+    if len(image_bytes) <= max_size_bytes:
+        return image_bytes
+    
+    try:
+        # Open image
+        img = Image.open(io.BytesIO(image_bytes))
+        
+        # Convert RGBA to RGB if needed
+        if img.mode == 'RGBA':
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            background.paste(img, mask=img.split()[3])
+            img = background
+        
+        # Start with quality 85 and reduce until under size limit
+        quality = 85
+        while quality > 20:
+            output = io.BytesIO()
+            img.save(output, format='JPEG', quality=quality, optimize=True)
+            compressed_bytes = output.getvalue()
+            
+            if len(compressed_bytes) <= max_size_bytes:
+                return compressed_bytes
+            
+            quality -= 5
+        
+        # If still too large, resize the image
+        scale = 0.8
+        while scale > 0.3:
+            new_width = int(img.width * scale)
+            new_height = int(img.height * scale)
+            resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            
+            output = io.BytesIO()
+            resized.save(output, format='JPEG', quality=85, optimize=True)
+            compressed_bytes = output.getvalue()
+            
+            if len(compressed_bytes) <= max_size_bytes:
+                return compressed_bytes
+            
+            scale -= 0.1
+        
+        # Return best effort
+        return compressed_bytes
+    except Exception as e:
+        logger.error(f"Compression error: {str(e)}")
+        return image_bytes
+
 @bot.command(name='imagine')
 async def imagine_command(ctx, *, prompt: str = None):
     """Generate an image from text prompt"""
@@ -335,9 +392,13 @@ async def imagine_command(ctx, *, prompt: str = None):
         guild_id = str(ctx.guild.id) if ctx.guild else "dm"
         selected_model = image_models.get(guild_id, "flux")
         
+        # Discord file size limits: 8MB for free servers, 50MB for boosted (Level 2), 100MB for Level 3
+        # We'll use 8MB as safe default
+        MAX_FILE_SIZE = 8 * 1024 * 1024  # 8 MB in bytes
+        
         # Show typing indicator
         async with ctx.typing():
-            await ctx.reply(f"🎨 Generating image with **{AVAILABLE_IMAGE_MODELS.get(selected_model, selected_model)}**: *{prompt}*\nThis may take a moment...")
+            status_msg = await ctx.reply(f"🎨 Generating image with **{AVAILABLE_IMAGE_MODELS.get(selected_model, selected_model)}**: *{prompt}*\nThis may take a moment...")
             
             try:
                 # Create a synchronous wrapper function
@@ -357,11 +418,12 @@ async def imagine_command(ctx, *, prompt: str = None):
                 
                 # Check if response is valid
                 if response is None:
-                    await ctx.reply("❌ Image generation failed. The provider may be unavailable. Try: `!listimagemodels` to see other options.")
+                    await status_msg.edit(content="❌ Image generation failed. The provider may be unavailable. Try: `!listimagemodels` to see other options.")
                     return
                 
-                # Get image URL from response
+                # Get image URL or data from response
                 image_url = None
+                image_data = None
                 
                 # Try different response formats
                 if hasattr(response, 'data') and response.data:
@@ -371,22 +433,79 @@ async def imagine_command(ctx, *, prompt: str = None):
                             image_url = first_item.url
                         elif isinstance(first_item, str):
                             image_url = first_item
+                        elif hasattr(first_item, 'b64_json'):
+                            import base64
+                            image_data = base64.b64decode(first_item.b64_json)
                 elif isinstance(response, str):
                     image_url = response
+                elif isinstance(response, bytes):
+                    image_data = response
                 
-                if image_url:
-                    # Create embed with image
+                # If we have image data (not URL), check size and compress if needed
+                if image_data:
+                    size_mb = len(image_data) / (1024 * 1024)
+                    if len(image_data) > MAX_FILE_SIZE:
+                        logger.info(f"Image size {size_mb:.2f}MB exceeds limit, compressing...")
+                        image_data = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_data)
+                        new_size_mb = len(image_data) / (1024 * 1024)
+                        logger.info(f"Compressed to {new_size_mb:.2f}MB")
+                    
+                    file = discord.File(io.BytesIO(image_data), filename="generated_image.jpg")
                     embed = discord.Embed(
                         title="Generated Image",
                         description=prompt,
                         color=discord.Color.blue()
                     )
-                    embed.set_image(url=image_url)
+                    embed.set_image(url="attachment://generated_image.jpg")
                     embed.set_footer(text=f"Requested by {ctx.author.display_name} | Model: {selected_model}")
-                    
-                    await ctx.send(embed=embed)
+                    await ctx.send(embed=embed, file=file)
+                    await status_msg.delete()
+                    return
+                
+                # If we have a URL, try to download and send as file (more reliable)
+                if image_url:
+                    try:
+                        # Download the image
+                        def download_image():
+                            response = requests.get(image_url, timeout=30)
+                            response.raise_for_status()
+                            return response.content
+                        
+                        image_bytes = await asyncio.get_event_loop().run_in_executor(None, download_image)
+                        
+                        # Check size and compress if needed
+                        size_mb = len(image_bytes) / (1024 * 1024)
+                        if len(image_bytes) > MAX_FILE_SIZE:
+                            logger.info(f"Downloaded image size {size_mb:.2f}MB exceeds limit, compressing...")
+                            image_bytes = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_bytes)
+                            new_size_mb = len(image_bytes) / (1024 * 1024)
+                            logger.info(f"Compressed to {new_size_mb:.2f}MB")
+                        
+                        # Send as file attachment
+                        file = discord.File(io.BytesIO(image_bytes), filename="generated_image.jpg")
+                        embed = discord.Embed(
+                            title="Generated Image",
+                            description=prompt,
+                            color=discord.Color.blue()
+                        )
+                        embed.set_image(url="attachment://generated_image.jpg")
+                        embed.set_footer(text=f"Requested by {ctx.author.display_name} | Model: {selected_model}")
+                        await ctx.send(embed=embed, file=file)
+                        await status_msg.delete()
+                    except Exception as download_error:
+                        logger.error(f"Download error: {str(download_error)}")
+                        # Fallback: try sending URL directly
+                        embed = discord.Embed(
+                            title="Generated Image",
+                            description=prompt,
+                            color=discord.Color.blue()
+                        )
+                        embed.set_image(url=image_url)
+                        embed.set_footer(text=f"Requested by {ctx.author.display_name} | Model: {selected_model}")
+                        await ctx.send(embed=embed)
+                        await status_msg.delete()
                 else:
-                    await ctx.reply("❌ Could not extract image from response. Try: `!setimagemodel flux`")
+                    await status_msg.edit(content="❌ Could not extract image from response. Try: `!setimagemodel flux`")
                     
             except Exception as gen_error:
                 logger.error(f"Generation wrapper error: {str(gen_error)}")
