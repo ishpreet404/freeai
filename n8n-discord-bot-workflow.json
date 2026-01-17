@@ -69,7 +69,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "YOUR_API_URL/image",
+        "url": "https://freeai-i8ib.onrender.com/image",
         "authentication": "none",
         "sendBody": true,
         "bodyParameters": {
@@ -91,7 +91,7 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "YOUR_API_URL/chat",
+        "url": "https://freeai-i8ib.onrender.com/chat",
         "authentication": "none",
         "sendBody": true,
         "bodyParameters": {
