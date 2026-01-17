@@ -216,7 +216,7 @@ async def clear_history(ctx):
     else:
         await ctx.reply("You don't have any conversation history.")
 
-@bot.command(name='help')
+@bot.command(name='bothelp')
 async def help_command(ctx):
     """Show help message"""
     embed = discord.Embed(
@@ -239,7 +239,7 @@ async def help_command(ctx):
         value=(
             "`!clear` - Clear your conversation history\n"
             "`!ping` - Check bot latency\n"
-            "`!help` - Show this message"
+            "`!bothelp` - Show this message"
         ),
         inline=False
     )
