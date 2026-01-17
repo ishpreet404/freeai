@@ -297,16 +297,40 @@ async def imagine_command(ctx, *, prompt: str = None):
         async with ctx.typing():
             await ctx.reply(f"🎨 Generating image with **{AVAILABLE_IMAGE_MODELS.get(selected_model, selected_model)}**: *{prompt}*\nThis may take a moment...")
             
-            # Generate image using g4f
-            response = await asyncio.to_thread(
-                g4f_client.images.generate,
-                model=selected_model,
-                prompt=prompt
-            )
-            
-            # Get image URL
-            if response.data and len(response.data) > 0:
-                image_url = response.data[0].url if hasattr(response.data[0], 'url') else None
+            try:
+                # Create a synchronous wrapper function
+                def generate_image():
+                    try:
+                        response = g4f_client.images.generate(
+                            model=selected_model,
+                            prompt=prompt
+                        )
+                        return response
+                    except Exception as inner_e:
+                        logger.error(f"Inner generation error: {str(inner_e)}")
+                        return None
+                
+                # Run in thread pool
+                response = await asyncio.get_event_loop().run_in_executor(None, generate_image)
+                
+                # Check if response is valid
+                if response is None:
+                    await ctx.reply("❌ Image generation failed. The provider may be unavailable. Try: `!listimagemodels` to see other options.")
+                    return
+                
+                # Get image URL from response
+                image_url = None
+                
+                # Try different response formats
+                if hasattr(response, 'data') and response.data:
+                    if len(response.data) > 0:
+                        first_item = response.data[0]
+                        if hasattr(first_item, 'url'):
+                            image_url = first_item.url
+                        elif isinstance(first_item, str):
+                            image_url = first_item
+                elif isinstance(response, str):
+                    image_url = response
                 
                 if image_url:
                     # Create embed with image
@@ -316,17 +340,21 @@ async def imagine_command(ctx, *, prompt: str = None):
                         color=discord.Color.blue()
                     )
                     embed.set_image(url=image_url)
-                    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+                    embed.set_footer(text=f"Requested by {ctx.author.display_name} | Model: {selected_model}")
                     
                     await ctx.send(embed=embed)
                 else:
-                    await ctx.reply("Failed to generate image. Please try again.")
-            else:
-                await ctx.reply("Failed to generate image. Please try again.")
+                    await ctx.reply("❌ Could not extract image from response. Try: `!setimagemodel flux`")
+                    
+            except Exception as gen_error:
+                logger.error(f"Generation wrapper error: {str(gen_error)}")
+                await ctx.reply(f"❌ Image generation error: {str(gen_error)}\nTry: `!setimagemodel flux`")
                 
     except Exception as e:
-        logger.error(f"Image generation error: {str(e)}")
-        await ctx.reply(f"Sorry, I couldn't generate that image: {str(e)}")
+        logger.error(f"Image command error: {str(e)}")
+        await ctx.reply(f"❌ Command error: {str(e)}\nTry: `!listimagemodels` to see available models")
+
+
 
 @bot.command(name='ask')
 async def ask_command(ctx, *, question: str = None):

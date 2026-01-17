@@ -1,193 +1,317 @@
-# Discord AI Bot with g4f - Deployment Guide
+# 🤖 Free AI Discord Bot
 
-This project provides a Discord bot using n8n that leverages g4f (gpt4free) for AI chat and image generation capabilities.
+A powerful Discord bot with AI chat, image generation, image analysis, voice features, and YouTube music player - all using free APIs!
 
-## Project Structure
+## ✨ Features
 
-- `app.py` - Flask API server that wraps g4f functionality
-- `requirements.txt` - Python dependencies
-- `Dockerfile` - Docker configuration for deployment
-- `n8n-discord-bot-workflow.json` - n8n workflow to import
+- 💬 **AI Chat** - GPT-4 powered conversations
+- 🖼️ **Image Generation** - 6 different AI models
+- 📸 **Image Analysis** - Upload images for AI analysis
+- 🎙️ **Text-to-Speech** - Indian female voice
+- 📝 **Speech-to-Text** - Transcribe audio files
+- 🎵 **YouTube Music Player** - Full-featured with queue system
 
-## Part 1: Deploy the g4f API Server
+## 🚀 Quick Start
 
-You need to deploy the Python API server to a hosting service. Here are free options:
+### Requirements
+- Python 3.9+
+- Discord Bot Token
+- FFmpeg (included in Docker)
 
-### Option A: Deploy to Render (Recommended - Free Tier Available)
+### Installation
 
-1. Create account at [render.com](https://render.com)
-2. Click "New +" → "Web Service"
-3. Connect your GitHub repository or use "Deploy from Docker"
-4. Configure:
-   - **Name**: `g4f-api` (or your choice)
-   - **Environment**: `Docker`
-   - **Region**: Choose closest to you
-   - **Branch**: `main`
-   - **Instance Type**: `Free`
-5. Click "Create Web Service"
-6. Wait for deployment (5-10 minutes)
-7. Copy your API URL (e.g., `https://g4f-api-xxxx.onrender.com`)
+1. **Clone repository**
+```bash
+git clone <your-repo>
+cd freeaidc
+```
 
-### Option B: Deploy to Railway
+2. **Set environment variables**
+```bash
+# Windows PowerShell
+$env:DISCORD_BOT_TOKEN="your_discord_bot_token"
 
-1. Create account at [railway.app](https://railway.app)
-2. Click "New Project" → "Deploy from GitHub repo"
-3. Select your repository
-4. Railway will auto-detect the Dockerfile
-5. Wait for deployment
-6. Copy your API URL from the deployment settings
+# Linux/Mac
+export DISCORD_BOT_TOKEN="your_discord_bot_token"
+```
 
-### Option C: Deploy to Fly.io
+3. **Install dependencies**
+```bash
+pip install -r requirements.txt
+```
+
+4. **Run bot**
+```bash
+python discord_bot.py
+```
+
+### Docker Deployment
 
 ```bash
-# Install flyctl
-# Windows (PowerShell)
-iwr https://fly.io/install.ps1 -useb | iex
+# Build
+docker build -f Dockerfile.bot -t discord-ai-bot .
 
-# Login
-fly auth login
-
-# Deploy (run from project folder)
-fly launch
-fly deploy
+# Run
+docker run -e DISCORD_BOT_TOKEN=your_token discord-ai-bot
 ```
 
-## Part 2: Set Up Discord Bot
+### Deploy to Render
+
+1. Create Web Service on Render
+2. Connect your repository
+3. Set environment variable: `DISCORD_BOT_TOKEN`
+4. Deploy automatically!
+
+## 📋 All Commands
+
+### 💬 Chat Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `?<message>` | Chat with AI (maintains context) | `?What is Python?` |
+| `!ask <question>` | Ask AI a one-time question | `!ask Explain quantum physics` |
+| `!clear` | Clear your conversation history | `!clear` |
+
+### 🖼️ Image Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `!imagine <prompt>` | Generate an image | `!imagine a sunset over mountains` |
+| `!listimagemodels` | Show available image models | `!listimagemodels` |
+| `!setimagemodel <model>` | Set image model (Admin) | `!setimagemodel flux-pro` |
+| Upload image + text | Analyze an image | Upload image + `What's in this?` |
+
+**Available Image Models:**
+- `flux` - Fast & Quality (Default)
+- `flux-pro` - Higher Quality
+- `flux-realism` - Photorealistic
+- `dalle` - DALL-E
+- `sdxl` - Stable Diffusion XL
+- `playground-v2.5` - Playground v2.5
+
+### 🎙️ Voice Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `!speak <text>` | Text-to-speech (Indian voice) | `!speak Hello everyone` |
+| `!transcribe` | Transcribe audio attachment | Upload audio + `!transcribe` |
+| `!join` | Join your voice channel | `!join` |
+| `!leave` | Leave voice channel | `!leave` |
+
+### 🎵 Music Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `!play <url/query>` | Play music from YouTube | `!play Imagine Dragons Believer` |
+| `!pause` | Pause current song | `!pause` |
+| `!resume` | Resume paused song | `!resume` |
+| `!skip` | Skip to next song | `!skip` |
+| `!stop` | Stop and clear queue | `!stop` |
+| `!queue` | Show music queue | `!queue` |
+| `!nowplaying` or `!np` | Show current song | `!np` |
+| `!disconnect` or `!dc` | Leave voice channel | `!dc` |
+
+### 👑 Admin Commands (Requires Manage Channels)
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `!setchannel` | Enable bot in current channel | `!setchannel` |
+| `!removechannel` | Disable bot in current channel | `!removechannel` |
+| `!listchannels` | List active channels | `!listchannels` |
+| `!clearallchannels` | Remove all channel restrictions | `!clearallchannels` |
+| `!setimagemodel <model>` | Set image generation model | `!setimagemodel flux-pro` |
+
+### 🔧 Utility Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `!ping` | Check bot latency | `!ping` |
+| `!bothelp` | Show help message | `!bothelp` |
+
+## 🎯 Usage Examples
+
+### Chat with AI
+```
+User: ?Tell me a joke
+Bot: Why did the programmer quit his job? Because he didn't get arrays!
+
+User: ?That's funny!
+Bot: I'm glad you enjoyed it! Would you like to hear another one?
+```
+
+### Generate Images
+```
+User: !imagine a cat wearing a crown, digital art
+Bot: 🎨 Generating image with Flux (Default - Fast & Quality)...
+     [Beautiful image appears]
+```
+
+### Play Music
+```
+User: !play Believer
+Bot: 🎵 Now Playing
+     Imagine Dragons - Believer
+     Duration: 3:24
+     Requested by @User
+```
+
+### Voice Features
+```
+User: !speak Namaste! Kaise ho aap?
+Bot: 🔊 Here's your audio: [speech.mp3]
+
+User: !transcribe [uploads audio]
+Bot: 📝 Transcription: Hello, this is a test message
+```
+
+## 🎨 Beautiful UI Features
+
+### Rich Embeds
+- 🖼️ Thumbnails for music and images
+- 📊 Queue position display
+- 👤 Requester mentions
+- 🎨 Color-coded status
+
+### Music Queue Display
+```
+🎵 Music Queue
+━━━━━━━━━━━━━━━
+🎶 Now Playing
+Current Song - 3:24
+
+📋 Up Next
+1. Song Title - 4:15
+2. Another Song - 3:30
+3. More Music - 5:00
+
+Total: 10 songs
+```
+
+## 🔑 Discord Bot Setup
 
 1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
-2. Click "New Application" → Give it a name
-3. Go to "Bot" section:
-   - Click "Add Bot"
-   - Copy the **Bot Token** (you'll need this for n8n)
-   - Enable these Privileged Gateway Intents:
-     - ✅ Message Content Intent
-     - ✅ Server Members Intent
-4. Go to "OAuth2" → "URL Generator":
+2. Create New Application
+3. Go to "Bot" section → Add Bot
+4. **Enable Privileged Gateway Intents:**
+   - ✅ Message Content Intent (CRITICAL!)
+   - ✅ Server Members Intent
+5. Copy Bot Token
+6. Go to OAuth2 → URL Generator:
    - Scopes: `bot`
-   - Bot Permissions: 
-     - Send Messages
+   - Permissions: 
      - Read Messages/View Channels
-     - Send Messages in Threads
+     - Send Messages
      - Embed Links
      - Attach Files
-5. Copy the generated URL and open it to invite bot to your server
+     - Connect (voice)
+     - Speak (voice)
+7. Invite bot to your server
 
-## Part 3: Configure n8n Workflow
+## ⚙️ Environment Variables
 
-1. Log into your hosted n8n instance
-2. Click on "Workflows" → "Import from File"
-3. Upload `n8n-discord-bot-workflow.json`
-4. Configure the workflow:
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DISCORD_BOT_TOKEN` | Yes | Your Discord bot token |
+| `PORT` | No | Port for health checks (default: 5000) |
+| `RENDER_EXTERNAL_URL` | No | For keep-alive on Render |
 
-### Step 1: Add Discord Bot Credentials
-- Click on any Discord node
-- Click "Create New Credential"
-- Paste your Discord Bot Token
-- Save
+## 🐳 Docker Configuration
 
-### Step 2: Update API URLs
-You need to replace `YOUR_API_URL` in two nodes:
-- **Generate Image** node: Change URL to `https://your-api-url.com/image`
-- **Generate Chat Response** node: Change URL to `https://your-api-url.com/chat`
+The `Dockerfile.bot` includes:
+- Python 3.11
+- FFmpeg (for audio processing)
+- All required Python packages
+- Optimized for Render free tier
 
-### Step 3: Activate Workflow
-- Click "Active" toggle at top right
-- Your bot is now live!
+## 🔒 Security
 
-## How to Use the Bot
+- Never commit your bot token
+- Use environment variables
+- Add `.env` to `.gitignore`
+- Restrict bot permissions to only what's needed
 
-### Chat (LLM)
-Just type any message in Discord:
-```
-User: What is the capital of France?
-Bot: The capital of France is Paris.
-```
+## 📊 Resource Usage (Render Free Tier)
 
-### Image Generation
-Use the `/imagine` command:
-```
-User: /imagine a beautiful sunset over mountains
-Bot: [Returns generated image]
-```
+| Feature | Memory | CPU | Disk |
+|---------|--------|-----|------|
+| Base Bot | ~50MB | Low | 0MB |
+| Image Gen | ~5MB | Low | 0MB |
+| TTS | ~5MB | Low | 0MB |
+| Music Stream | ~15MB | Med | 0MB (streaming) |
+| **Total** | ~75MB | Low-Med | 0MB |
 
-## API Endpoints
+✅ Well within Render's free tier limits!
 
-Your deployed API has these endpoints:
+## 🚨 Troubleshooting
 
-### `GET /`
-Health check and service info
+### Commands not working
+1. ✅ Enable **Message Content Intent** in Discord Developer Portal
+2. ✅ Restart bot after code changes
+3. ✅ Check bot has permissions in channel
+4. ✅ Verify bot token is correct
 
-### `POST /chat`
-Generate text responses
-```json
-{
-  "message": "Your question here",
-  "model": "gpt-4",
-  "conversation_history": []
-}
-```
+### Music not playing
+1. ✅ Check FFmpeg is installed
+2. ✅ Bot needs "Connect" and "Speak" permissions
+3. ✅ Join a voice channel first
 
-### `POST /image`
-Generate images
-```json
-{
-  "prompt": "Your image description"
-}
-```
+### Image generation fails
+1. ✅ Try different model: `!setimagemodel flux`
+2. ✅ Free providers may have temporary outages
 
-### `GET /providers`
-List available g4f providers
+### Voice features not working
+1. ✅ Verify FFmpeg is installed (included in Docker)
+2. ✅ Check voice permissions
+3. ✅ For transcription, use supported formats (mp3, wav, ogg, m4a)
 
-## Troubleshooting
+## 🎯 Tips
 
-### Bot not responding
-1. Check n8n workflow is **Active**
-2. Verify Discord bot has proper permissions in your server
-3. Check API server is running (visit its URL, should show status page)
-4. Check n8n execution logs for errors
+1. **Chat Context**: Use `?` for conversations, `!ask` for single questions
+2. **Clear History**: Use `!clear` if responses seem off-context
+3. **Music Search**: Be specific: `!play believer imagine dragons`
+4. **Image Quality**: Try different models for best results
+5. **Voice Quality**: Use clear audio for better transcription
 
-### Image generation not working
-- g4f image providers can be unstable
-- Try different prompts
-- Check API logs
+## 📦 Dependencies
 
-### API timing out
-- Some providers are slower than others
-- Render free tier spins down after inactivity (takes ~30s to wake up)
-- Consider upgrading to paid tier if needed
+- `discord.py` - Discord API wrapper
+- `g4f` - Free AI chat and image generation
+- `edge-tts` - Text-to-speech
+- `yt-dlp` - YouTube downloader
+- `SpeechRecognition` - Speech-to-text
+- `pydub` - Audio processing
+- `PyNaCl` - Voice encryption
+- `FFmpeg` - Audio encoding/decoding
 
-## Advanced Configuration
+## 🎉 Features Summary
 
-### Change AI Model
-In the n8n workflow, edit the "Generate Chat Response" node:
-- Change `model` parameter to: `gpt-3.5-turbo`, `claude-3`, `gemini-pro`, etc.
+✅ AI Chat with GPT-4
+✅ 6 Image generation models
+✅ Image analysis with vision AI
+✅ Text-to-speech (Indian voice)
+✅ Speech-to-text transcription
+✅ YouTube music player
+✅ Queue system with auto-advance
+✅ Rich embeds with thumbnails
+✅ Channel restrictions
+✅ Admin controls
+✅ 100% Free APIs
+✅ No API keys required
+✅ Render free tier compatible
+✅ Beautiful UI
 
-### Add Conversation Memory
-You can store conversation history using n8n's built-in memory nodes or a database to maintain context across messages.
+## 📄 License
 
-### Rate Limiting
-Add n8n's "Limit" node before the API calls to prevent spam.
+MIT License - Feel free to use and modify!
 
-## Cost
+## 🤝 Contributing
 
-- **g4f API**: Free (uses reverse-engineered providers)
-- **n8n**: Your existing hosted instance
-- **Discord Bot**: Free
-- **Hosting**: 
-  - Render: Free tier available (spins down after 15min inactivity)
-  - Railway: $5 credit/month on free tier
-  - Fly.io: Free tier available
+Pull requests welcome! For major changes, please open an issue first.
 
-## Notes
+## ⚠️ Disclaimer
 
-- g4f providers can be unstable and change frequently
-- Free hosting services may have cold start delays
-- For production use, consider paid hosting for better reliability
-- Respect rate limits and terms of service
+This bot uses free APIs which may have rate limits or availability issues. For production use, consider official APIs with proper authentication.
 
-## Support
+---
 
-If you encounter issues:
-1. Check API health endpoint: `https://your-api-url.com/health`
-2. Review n8n execution logs
-3. Check g4f GitHub for provider status updates
+**Made with ❤️ - Enjoy your all-in-one Discord bot! 🚀**
