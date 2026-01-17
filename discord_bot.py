@@ -400,21 +400,12 @@ async def imagine_command(ctx, *, prompt: str = None):
         status_msg = await ctx.reply(f"🎨 Generating images with **{AVAILABLE_IMAGE_MODELS.get(selected_model, selected_model)}**\n> _{prompt}_\n\n⏳ Trying multiple providers...")
         
         try:
-            # Import providers
-            from g4f.Provider import Blackbox, PollinationsAI, Airforce
+            # Import providers - PollinationsImage is the main image provider
+            from g4f.Provider import PollinationsImage, PollinationsAI
             
-            # Define providers to try for each model
-            provider_map = {
-                'flux': [Blackbox, PollinationsAI, Airforce],
-                'flux-pro': [Blackbox, Airforce, PollinationsAI],
-                'flux-realism': [Blackbox, PollinationsAI, Airforce],
-                'sdxl': [PollinationsAI, Airforce, Blackbox],
-                'playground-v2.5': [Airforce, Blackbox, PollinationsAI],
-                'dalle': [Airforce, Blackbox, PollinationsAI]
-            }
-            
-            # Get providers for selected model
-            providers_to_try = provider_map.get(selected_model, [Blackbox, PollinationsAI, Airforce])
+            # For image generation, g4f uses PollinationsImage provider which supports multiple models
+            # We'll try generating with PollinationsImage twice for redundancy
+            providers_to_try = [PollinationsImage, PollinationsImage]
             
             # Function to generate image with a specific provider
             def generate_with_provider(provider):
