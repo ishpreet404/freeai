@@ -112,6 +112,22 @@ docker run -e DISCORD_BOT_TOKEN=your_token discord-ai-bot
 | `!nowplaying` or `!np` | Show current song | `!np` |
 | `!disconnect` or `!dc` | Leave voice channel | `!dc` |
 
+### 🎬 Movie & TV Streaming Commands
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `!movie <title>` | Search movie & get streaming links | `!movie Inception` |
+| `!tv <title>` or `!series` | Search TV show (defaults to S1E1) | `!tv Breaking Bad` |
+| `!tvepisode <tmdb_id> <season> <episode>` | Get specific episode links | `!tvepisode 1396 1 1` |
+
+**Available Streaming Providers:**
+- VidSrc (Recommended) - High quality, reliable
+- VixSrc - Alternative quality
+- GoDrive Player - Fast loading
+- Embed.su - HD quality
+- 2Embed - Multiple servers
+- VidFast - Auto-play enabled
+
 ### 👑 Admin Commands (Requires Manage Channels)
 
 | Command | Description | Example |

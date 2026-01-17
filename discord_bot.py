@@ -17,6 +17,7 @@ import tempfile
 from collections import deque
 import re
 from spotdl import Spotdl
+from tmdbv3api import TMDb, Movie, TV
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -33,6 +34,13 @@ AI_PREFIX = "?"
 
 # Initialize g4f client
 g4f_client = Client()
+
+# Initialize TMDB
+tmdb = TMDb()
+tmdb.api_key = 'ae4bd1b6fce2a5648671bfc171d15ba4'
+tmdb.language = 'en'
+movie_api = Movie()
+tv_api = TV()
 
 # Store conversation history (in-memory, resets on restart)
 conversation_history = {}
@@ -1236,6 +1244,214 @@ async def channel_command_error(ctx, error):
     """Handle permission errors for channel commands"""
     if isinstance(error, commands.MissingPermissions):
         await ctx.reply("❌ You need **Manage Channels** permission to use this command!")
+
+# Movie/TV Streaming Commands
+
+STREAMING_PROVIDERS = {
+    'vidsrc': 'VidSrc (Recommended)',
+    'vixsrc': 'VixSrc',
+    'godrive': 'GoDrive Player',
+    'embedsu': 'Embed.su',
+    '2embed': '2Embed',
+    'vidfast': 'VidFast'
+}
+
+def get_streaming_url(media_type: str, tmdb_id: str, imdb_id: str = None, provider: str = 'vidsrc', season: int = None, episode: int = None) -> str:
+    """Generate streaming URL based on provider and media type"""
+    if media_type == 'movie':
+        if provider == 'vixsrc':
+            return f"https://vixsrc.to/movie/{tmdb_id}"
+        elif provider == 'vidsrc':
+            return f"https://vidsrc.to/embed/movie/{imdb_id if imdb_id else tmdb_id}"
+        elif provider == 'godrive':
+            return f"https://godriveplayer.com/player.php?imdb={imdb_id}" if imdb_id else f"https://godriveplayer.com/player.php?tmdb={tmdb_id}"
+        elif provider == 'embedsu':
+            return f"https://embed.su/embed/movie/{tmdb_id}"
+        elif provider == '2embed':
+            return f"https://www.2embed.cc/embed/{imdb_id if imdb_id else tmdb_id}"
+        elif provider == 'vidfast':
+            return f"https://vidfast.pro/movie/{tmdb_id}?autoPlay=true"
+    elif media_type == 'tv':
+        if provider == 'vixsrc':
+            return f"https://vixsrc.to/tv/{tmdb_id}/{season}/{episode}"
+        elif provider == 'vidsrc':
+            return f"https://vidsrc.to/embed/tv/{imdb_id if imdb_id else tmdb_id}/{season}/{episode}"
+        elif provider == 'godrive':
+            return f"https://godriveplayer.com/player.php?type=series&imdb={imdb_id}&season={season}&episode={episode}" if imdb_id else f"https://godriveplayer.com/player.php?type=series&tmdb={tmdb_id}&season={season}&episode={episode}"
+        elif provider == 'embedsu':
+            return f"https://embed.su/embed/tv/{tmdb_id}/{season}/{episode}"
+        elif provider == '2embed':
+            return f"https://www.2embed.cc/embedtv/{imdb_id if imdb_id else tmdb_id}&s={season}&e={episode}"
+        elif provider == 'vidfast':
+            return f"https://vidfast.pro/tv/{tmdb_id}/{season}/{episode}?autoPlay=true"
+    return None
+
+@bot.command(name='movie')
+async def search_movie(ctx, *, query: str = None):
+    """Search for a movie and get streaming links"""
+    if not query:
+        await ctx.reply("Please provide a movie name!\nExample: `!movie Inception`")
+        return
+    
+    async with ctx.typing():
+        try:
+            # Search TMDB
+            results = movie_api.search(query)
+            
+            if not results:
+                await ctx.reply(f"❌ No movies found for: {query}")
+                return
+            
+            movie = results[0]
+            movie_details = movie_api.details(movie.id)
+            
+            # Get external IDs for IMDb
+            external_ids = movie_api.external_ids(movie.id)
+            imdb_id = external_ids.get('imdb_id', None)
+            
+            # Create embed
+            embed = discord.Embed(
+                title=f"{movie_details.title} ({movie_details.release_date[:4] if movie_details.release_date else 'N/A'})",
+                description=movie_details.overview[:300] + "..." if len(movie_details.overview) > 300 else movie_details.overview,
+                color=discord.Color.blue(),
+                url=f"https://www.themoviedb.org/movie/{movie.id}"
+            )
+            
+            # Add poster
+            if movie_details.poster_path:
+                embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w500{movie_details.poster_path}")
+            
+            # Add fields
+            embed.add_field(name="⭐ Rating", value=f"{movie_details.vote_average:.1f}/10", inline=True)
+            embed.add_field(name="🎬 Runtime", value=f"{movie_details.runtime} min" if movie_details.runtime else "N/A", inline=True)
+            embed.add_field(name="🎭 Genres", value=", ".join([g.name for g in movie_details.genres[:3]]) if movie_details.genres else "N/A", inline=True)
+            
+            # Create buttons for streaming providers
+            view = discord.ui.View()
+            for provider_key, provider_name in STREAMING_PROVIDERS.items():
+                stream_url = get_streaming_url('movie', str(movie.id), imdb_id, provider_key)
+                if stream_url:
+                    view.add_item(discord.ui.Button(
+                        label=f"▶️ {provider_name}",
+                        url=stream_url,
+                        style=discord.ButtonStyle.link
+                    ))
+            
+            embed.set_footer(text=f"TMDB ID: {movie.id} | IMDb ID: {imdb_id if imdb_id else 'N/A'}")
+            
+            await ctx.reply(embed=embed, view=view)
+            
+        except Exception as e:
+            logger.error(f"Movie search error: {str(e)}")
+            await ctx.reply(f"❌ Error searching movie: {str(e)}")
+
+@bot.command(name='tv', aliases=['series', 'show'])
+async def search_tv(ctx, *, query: str = None):
+    """Search for a TV show and get streaming links"""
+    if not query:
+        await ctx.reply("Please provide a TV show name!\nExample: `!tv Breaking Bad`")
+        return
+    
+    async with ctx.typing():
+        try:
+            # Search TMDB
+            results = tv_api.search(query)
+            
+            if not results:
+                await ctx.reply(f"❌ No TV shows found for: {query}")
+                return
+            
+            show = results[0]
+            show_details = tv_api.details(show.id)
+            
+            # Get external IDs for IMDb
+            external_ids = tv_api.external_ids(show.id)
+            imdb_id = external_ids.get('imdb_id', None)
+            
+            # Create embed
+            embed = discord.Embed(
+                title=f"{show_details.name} ({show_details.first_air_date[:4] if show_details.first_air_date else 'N/A'})",
+                description=show_details.overview[:300] + "..." if len(show_details.overview) > 300 else show_details.overview,
+                color=discord.Color.purple(),
+                url=f"https://www.themoviedb.org/tv/{show.id}"
+            )
+            
+            # Add poster
+            if show_details.poster_path:
+                embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w500{show_details.poster_path}")
+            
+            # Add fields
+            embed.add_field(name="⭐ Rating", value=f"{show_details.vote_average:.1f}/10", inline=True)
+            embed.add_field(name="📺 Seasons", value=str(show_details.number_of_seasons), inline=True)
+            embed.add_field(name="🎬 Episodes", value=str(show_details.number_of_episodes), inline=True)
+            embed.add_field(name="🎭 Genres", value=", ".join([g.name for g in show_details.genres[:3]]) if show_details.genres else "N/A", inline=True)
+            embed.add_field(name="📅 Status", value=show_details.status, inline=True)
+            
+            # Default to Season 1 Episode 1
+            season = 1
+            episode = 1
+            
+            # Create buttons for streaming providers
+            view = discord.ui.View()
+            for provider_key, provider_name in STREAMING_PROVIDERS.items():
+                stream_url = get_streaming_url('tv', str(show.id), imdb_id, provider_key, season, episode)
+                if stream_url:
+                    view.add_item(discord.ui.Button(
+                        label=f"▶️ {provider_name}",
+                        url=stream_url,
+                        style=discord.ButtonStyle.link
+                    ))
+            
+            embed.set_footer(text=f"TMDB ID: {show.id} | IMDb ID: {imdb_id if imdb_id else 'N/A'} | S{season}E{episode}")
+            embed.add_field(name="💡 Tip", value=f"Use `!tvepisode {show.id} <season> <episode>` for specific episodes", inline=False)
+            
+            await ctx.reply(embed=embed, view=view)
+            
+        except Exception as e:
+            logger.error(f"TV search error: {str(e)}")
+            await ctx.reply(f"❌ Error searching TV show: {str(e)}")
+
+@bot.command(name='tvepisode', aliases=['episode', 'ep'])
+async def tv_episode(ctx, tmdb_id: str = None, season: int = 1, episode: int = 1):
+    """Get streaming links for a specific TV episode"""
+    if not tmdb_id:
+        await ctx.reply("Please provide TMDB ID, season, and episode!\nExample: `!tvepisode 1396 1 1`")
+        return
+    
+    async with ctx.typing():
+        try:
+            show_details = tv_api.details(int(tmdb_id))
+            external_ids = tv_api.external_ids(int(tmdb_id))
+            imdb_id = external_ids.get('imdb_id', None)
+            
+            # Create embed
+            embed = discord.Embed(
+                title=f"{show_details.name} - S{season}E{episode}",
+                description=show_details.overview[:200] + "..." if len(show_details.overview) > 200 else show_details.overview,
+                color=discord.Color.purple()
+            )
+            
+            if show_details.poster_path:
+                embed.set_thumbnail(url=f"https://image.tmdb.org/t/p/w500{show_details.poster_path}")
+            
+            # Create buttons
+            view = discord.ui.View()
+            for provider_key, provider_name in STREAMING_PROVIDERS.items():
+                stream_url = get_streaming_url('tv', tmdb_id, imdb_id, provider_key, season, episode)
+                if stream_url:
+                    view.add_item(discord.ui.Button(
+                        label=f"▶️ {provider_name}",
+                        url=stream_url,
+                        style=discord.ButtonStyle.link
+                    ))
+            
+            embed.set_footer(text=f"TMDB ID: {tmdb_id} | Season {season} Episode {episode}")
+            
+            await ctx.reply(embed=embed, view=view)
+            
+        except Exception as e:
+            logger.error(f"Episode error: {str(e)}")
+            await ctx.reply(f"❌ Error: {str(e)}")
 
 # Run the bot
 if __name__ == "__main__":
