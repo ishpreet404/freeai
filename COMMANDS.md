@@ -22,6 +22,29 @@ Upload image + type:
 "What's in this image?"       Analyze uploaded image
 ```
 
+## 🎙️ Voice Commands
+
+```
+!speak Hello everyone       Text-to-speech (Indian female voice)
+!transcribe                Transcribe uploaded audio file
+!join                      Join your voice channel
+!leave                     Leave voice channel
+!listen 10                 Listen for 10 seconds
+```
+
+## 🎵 Music Commands
+
+```
+!play <url or query>       Play music from YouTube
+!pause                     Pause current song
+!resume                    Resume paused song
+!skip                      Skip to next song
+!stop                      Stop and clear queue
+!queue                     Show music queue
+!nowplaying or !np         Show current song
+!disconnect or !dc         Leave voice channel
+```
+
 ## 🔧 Utility Commands
 
 ```

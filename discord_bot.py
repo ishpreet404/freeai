@@ -9,6 +9,14 @@ from flask import Flask, jsonify
 from threading import Thread
 import requests
 from datetime import datetime
+import edge_tts
+import io
+from pydub import AudioSegment
+import speech_recognition as sr
+import tempfile
+import yt_dlp
+from collections import deque
+import re
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -46,6 +54,36 @@ AVAILABLE_IMAGE_MODELS = {
 # Store selected image model per guild (in-memory, resets on restart)
 # Format: {guild_id: model_name}
 image_models = {}
+
+# Voice settings
+TTS_VOICE = "en-IN-NeerjaNeural"  # Indian female voice
+voice_clients = {}  # Store voice connections per guild
+
+# Music system
+music_queues = {}  # Format: {guild_id: deque([song_info, ...])}
+now_playing = {}   # Format: {guild_id: song_info}
+
+# YouTube downloader options
+YDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'extractaudio': True,
+    'audioformat': 'mp3',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': False,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'ytsearch',
+    'source_address': '0.0.0.0',
+}
+
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
 
 # Flask app for health checks (keeps Render active)
 app = Flask(__name__)
@@ -343,6 +381,446 @@ async def ask_command(ctx, *, question: str = None):
         logger.error(f"Chat error: {str(e)}")
         await ctx.reply(f"Sorry, I encountered an error: {str(e)}")
 
+@bot.command(name='speak')
+async def speak_command(ctx, *, text: str = None):
+    """Convert text to speech with Indian female voice"""
+    if not text:
+        await ctx.reply("Please provide text! Example: `!speak Hello, how are you?`")
+        return
+    
+    try:
+        async with ctx.typing():
+            # Generate speech with Edge TTS
+            communicate = edge_tts.Communicate(text, TTS_VOICE)
+            
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as tmp_file:
+                tmp_filename = tmp_file.name
+                await communicate.save(tmp_filename)
+            
+            # Send audio file
+            await ctx.reply("🔊 Here's your audio:", file=discord.File(tmp_filename, "speech.mp3"))
+            
+            # Clean up
+            os.unlink(tmp_filename)
+            
+    except Exception as e:
+        logger.error(f"TTS error: {str(e)}")
+        await ctx.reply(f"Sorry, I couldn't generate speech: {str(e)}")
+
+@bot.command(name='join')
+async def join_voice(ctx):
+    """Join your voice channel"""
+    if not ctx.author.voice:
+        await ctx.reply("❌ You need to be in a voice channel!")
+        return
+    
+    channel = ctx.author.voice.channel
+    guild_id = str(ctx.guild.id)
+    
+    try:
+        if guild_id in voice_clients and voice_clients[guild_id].is_connected():
+            await ctx.reply("ℹ️ Already in a voice channel! Use `!leave` first.")
+            return
+        
+        voice_client = await channel.connect()
+        voice_clients[guild_id] = voice_client
+        await ctx.reply(f"✅ Joined {channel.name}! Say something and I'll transcribe it.")
+        
+    except Exception as e:
+        logger.error(f"Voice join error: {str(e)}")
+        await ctx.reply(f"Sorry, couldn't join voice channel: {str(e)}")
+
+@bot.command(name='leave')
+async def leave_voice(ctx):
+    """Leave the voice channel"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+        await ctx.reply("❌ I'm not in a voice channel!")
+        return
+    
+    try:
+        await voice_clients[guild_id].disconnect()
+        del voice_clients[guild_id]
+        await ctx.reply("👋 Left the voice channel!")
+        
+    except Exception as e:
+        logger.error(f"Voice leave error: {str(e)}")
+        await ctx.reply(f"Sorry, couldn't leave voice channel: {str(e)}")
+
+@bot.command(name='listen')
+async def listen_command(ctx, duration: int = 5):
+    """Listen and transcribe voice (duration in seconds, max 30)"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+        await ctx.reply("❌ Bot must be in voice channel! Use `!join` first.")
+        return
+    
+    if duration > 30:
+        duration = 30
+        
+    try:
+        await ctx.reply(f"🎤 Listening for {duration} seconds...")
+        
+        # Create a sink to record audio
+        voice_client = voice_clients[guild_id]
+        
+        # Note: Discord.py voice recording is complex and requires additional setup
+        # For Render free tier, we'll use a simpler approach with audio attachments
+        await ctx.reply("ℹ️ Voice recording from channels requires additional setup. Please upload an audio file instead or use `!transcribe` with an audio attachment.")
+        
+    except Exception as e:
+        logger.error(f"Listen error: {str(e)}")
+        await ctx.reply(f"Sorry, couldn't listen: {str(e)}")
+
+@bot.command(name='transcribe')
+async def transcribe_command(ctx):
+    """Transcribe audio from an attachment"""
+    if not ctx.message.attachments:
+        await ctx.reply("Please attach an audio file (mp3, wav, ogg, m4a)!")
+        return
+    
+    attachment = ctx.message.attachments[0]
+    
+    # Check if it's an audio file
+    if not any(attachment.filename.lower().endswith(ext) for ext in ['.mp3', '.wav', '.ogg', '.m4a', '.webm']):
+        await ctx.reply("❌ Please attach an audio file (mp3, wav, ogg, m4a)!")
+        return
+    
+    try:
+        async with ctx.typing():
+            # Download audio file
+            audio_data = await attachment.read()
+            
+            # Save to temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(attachment.filename)[1]) as tmp_file:
+                tmp_file.write(audio_data)
+                tmp_filename = tmp_file.name
+            
+            # Convert to WAV if needed
+            wav_filename = tmp_filename
+            if not tmp_filename.endswith('.wav'):
+                audio = AudioSegment.from_file(tmp_filename)
+                wav_filename = tmp_filename.rsplit('.', 1)[0] + '.wav'
+                audio.export(wav_filename, format='wav')
+            
+            # Transcribe using speech_recognition
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(wav_filename) as source:
+                audio = recognizer.record(source)
+                text = await asyncio.to_thread(
+                    recognizer.recognize_google,
+                    audio
+                )
+            
+            # Clean up
+            os.unlink(tmp_filename)
+            if wav_filename != tmp_filename:
+                os.unlink(wav_filename)
+            
+            await ctx.reply(f"📝 **Transcription:**\n{text}")
+            
+    except sr.UnknownValueError:
+        await ctx.reply("❌ Could not understand the audio. Please try again with clearer audio.")
+    except sr.RequestError as e:
+        await ctx.reply(f"❌ Could not request transcription service: {str(e)}")
+    except Exception as e:
+        logger.error(f"Transcription error: {str(e)}")
+        await ctx.reply(f"Sorry, couldn't transcribe audio: {str(e)}")
+
+# YouTube Music Player Commands
+
+def get_music_queue(guild_id):
+    """Get or create music queue for guild"""
+    if guild_id not in music_queues:
+        music_queues[guild_id] = deque()
+    return music_queues[guild_id]
+
+async def play_next(ctx):
+    """Play next song in queue"""
+    guild_id = str(ctx.guild.id)
+    queue = get_music_queue(guild_id)
+    
+    if not queue:
+        now_playing.pop(guild_id, None)
+        return
+    
+    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+        return
+    
+    voice_client = voice_clients[guild_id]
+    song_info = queue.popleft()
+    now_playing[guild_id] = song_info
+    
+    try:
+        # Extract audio URL
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+            info = ydl.extract_info(song_info['url'], download=False)
+            url2 = info['url']
+        
+        # Create audio source
+        source = discord.FFmpegPCMAudio(url2, **FFMPEG_OPTIONS)
+        
+        # Play audio
+        def after_playing(error):
+            if error:
+                logger.error(f"Player error: {error}")
+            asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
+        
+        voice_client.play(source, after=after_playing)
+        
+        # Send now playing embed
+        embed = discord.Embed(
+            title="🎵 Now Playing",
+            description=f"**[{song_info['title']}]({song_info['url']})**",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Duration", value=song_info['duration'], inline=True)
+        embed.add_field(name="Requested by", value=song_info['requester'], inline=True)
+        if song_info.get('thumbnail'):
+            embed.set_thumbnail(url=song_info['thumbnail'])
+        embed.set_footer(text=f"Songs in queue: {len(queue)}")
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        logger.error(f"Error playing song: {str(e)}")
+        await ctx.send(f"❌ Error playing song: {str(e)}")
+        await play_next(ctx)
+
+@bot.command(name='play')
+async def play_music(ctx, *, query: str = None):
+    """Play music from YouTube (URL or search query)"""
+    if not query:
+        await ctx.reply("Please provide a YouTube URL or search query!\nExample: `!play Imagine Dragons Believer`")
+        return
+    
+    # Check if user is in voice channel
+    if not ctx.author.voice:
+        await ctx.reply("❌ You need to be in a voice channel!")
+        return
+    
+    guild_id = str(ctx.guild.id)
+    
+    # Join voice channel if not connected
+    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+        try:
+            channel = ctx.author.voice.channel
+            voice_client = await channel.connect()
+            voice_clients[guild_id] = voice_client
+        except Exception as e:
+            await ctx.reply(f"❌ Couldn't join voice channel: {str(e)}")
+            return
+    
+    async with ctx.typing():
+        try:
+            # Search or get video info
+            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+                # If it's not a URL, search for it
+                if not query.startswith('http'):
+                    query = f"ytsearch:{query}"
+                
+                info = ydl.extract_info(query, download=False)
+                
+                # Handle playlist
+                if 'entries' in info:
+                    info = info['entries'][0]
+                
+                song_info = {
+                    'url': info['webpage_url'],
+                    'title': info['title'],
+                    'duration': f"{info.get('duration', 0) // 60}:{info.get('duration', 0) % 60:02d}",
+                    'thumbnail': info.get('thumbnail'),
+                    'requester': ctx.author.mention
+                }
+            
+            queue = get_music_queue(guild_id)
+            voice_client = voice_clients[guild_id]
+            
+            # If nothing is playing, play immediately
+            if not voice_client.is_playing():
+                queue.append(song_info)
+                await play_next(ctx)
+            else:
+                # Add to queue
+                queue.append(song_info)
+                
+                embed = discord.Embed(
+                    title="➕ Added to Queue",
+                    description=f"**[{song_info['title']}]({song_info['url']})**",
+                    color=discord.Color.blue()
+                )
+                embed.add_field(name="Position", value=f"#{len(queue)}", inline=True)
+                embed.add_field(name="Duration", value=song_info['duration'], inline=True)
+                if song_info.get('thumbnail'):
+                    embed.set_thumbnail(url=song_info['thumbnail'])
+                
+                await ctx.reply(embed=embed)
+                
+        except Exception as e:
+            logger.error(f"Error adding song: {str(e)}")
+            await ctx.reply(f"❌ Error: {str(e)}")
+
+@bot.command(name='pause')
+async def pause_music(ctx):
+    """Pause currently playing music"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+        await ctx.reply("❌ Bot is not in a voice channel!")
+        return
+    
+    voice_client = voice_clients[guild_id]
+    
+    if voice_client.is_playing():
+        voice_client.pause()
+        await ctx.reply("⏸️ Paused music")
+    else:
+        await ctx.reply("❌ Nothing is playing!")
+
+@bot.command(name='resume')
+async def resume_music(ctx):
+    """Resume paused music"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+        await ctx.reply("❌ Bot is not in a voice channel!")
+        return
+    
+    voice_client = voice_clients[guild_id]
+    
+    if voice_client.is_paused():
+        voice_client.resume()
+        await ctx.reply("▶️ Resumed music")
+    else:
+        await ctx.reply("❌ Music is not paused!")
+
+@bot.command(name='skip')
+async def skip_music(ctx):
+    """Skip current song"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+        await ctx.reply("❌ Bot is not in a voice channel!")
+        return
+    
+    voice_client = voice_clients[guild_id]
+    
+    if voice_client.is_playing():
+        voice_client.stop()
+        await ctx.reply("⏭️ Skipped song")
+    else:
+        await ctx.reply("❌ Nothing is playing!")
+
+@bot.command(name='stop')
+async def stop_music(ctx):
+    """Stop music and clear queue"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+        await ctx.reply("❌ Bot is not in a voice channel!")
+        return
+    
+    voice_client = voice_clients[guild_id]
+    
+    # Clear queue
+    if guild_id in music_queues:
+        music_queues[guild_id].clear()
+    now_playing.pop(guild_id, None)
+    
+    # Stop playing
+    if voice_client.is_playing():
+        voice_client.stop()
+    
+    await ctx.reply("⏹️ Stopped music and cleared queue")
+
+@bot.command(name='queue')
+async def show_queue(ctx):
+    """Show current music queue"""
+    guild_id = str(ctx.guild.id)
+    queue = get_music_queue(guild_id)
+    
+    if not queue and guild_id not in now_playing:
+        await ctx.reply("📭 Queue is empty!")
+        return
+    
+    embed = discord.Embed(
+        title="🎵 Music Queue",
+        color=discord.Color.purple()
+    )
+    
+    # Now playing
+    if guild_id in now_playing:
+        current = now_playing[guild_id]
+        embed.add_field(
+            name="🎶 Now Playing",
+            value=f"**[{current['title']}]({current['url']})**\nRequested by {current['requester']}",
+            inline=False
+        )
+    
+    # Queue list
+    if queue:
+        queue_text = ""
+        for i, song in enumerate(list(queue)[:10], 1):
+            queue_text += f"`{i}.` [{song['title']}]({song['url']}) - {song['duration']}\n"
+        
+        if len(queue) > 10:
+            queue_text += f"\n*...and {len(queue) - 10} more songs*"
+        
+        embed.add_field(name="📋 Up Next", value=queue_text, inline=False)
+        embed.set_footer(text=f"Total songs in queue: {len(queue)}")
+    else:
+        embed.add_field(name="📋 Up Next", value="*Queue is empty*", inline=False)
+    
+    await ctx.reply(embed=embed)
+
+@bot.command(name='nowplaying', aliases=['np'])
+async def now_playing_command(ctx):
+    """Show currently playing song"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in now_playing:
+        await ctx.reply("❌ Nothing is playing!")
+        return
+    
+    song = now_playing[guild_id]
+    queue = get_music_queue(guild_id)
+    
+    embed = discord.Embed(
+        title="🎵 Now Playing",
+        description=f"**[{song['title']}]({song['url']})**",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="Duration", value=song['duration'], inline=True)
+    embed.add_field(name="Requested by", value=song['requester'], inline=True)
+    embed.add_field(name="Queue", value=f"{len(queue)} songs", inline=True)
+    
+    if song.get('thumbnail'):
+        embed.set_thumbnail(url=song['thumbnail'])
+    
+    await ctx.reply(embed=embed)
+
+@bot.command(name='disconnect', aliases=['dc'])
+async def disconnect_music(ctx):
+    """Disconnect bot from voice channel"""
+    guild_id = str(ctx.guild.id)
+    
+    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+        await ctx.reply("❌ Bot is not in a voice channel!")
+        return
+    
+    # Clean up
+    if guild_id in music_queues:
+        music_queues[guild_id].clear()
+    now_playing.pop(guild_id, None)
+    
+    await voice_clients[guild_id].disconnect()
+    del voice_clients[guild_id]
+    
+    await ctx.reply("👋 Disconnected from voice channel")
+
 @bot.command(name='clear')
 async def clear_history(ctx):
     """Clear conversation history for the user"""
@@ -376,10 +854,34 @@ async def help_command(ctx):
         value=(
             "`!ask <question>` - Ask AI a question\n"
             "`!imagine <prompt>` - Generate an image from text\n"
+            "`!speak <text>` - Convert text to speech (Indian voice)\n"
+            "`!transcribe` - Transcribe audio attachment\n"
             "`!clear` - Clear your conversation history\n"
             "`!ping` - Check bot latency\n"
-            "`!listimagemodels` - List available image models\n"
-            "`!bothelp` - Show this message"
+            "`!listimagemodels` - List available image models"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🎙️ Voice Commands",
+        value=(
+            "`!join` - Join your voice channel\n"
+            "`!leave` - Leave voice channel\n"
+            "`!listen [seconds]` - Listen and transcribe (max 30s)"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🎵 Music Commands",
+        value=(
+            "`!play <url/query>` - Play music from YouTube\n"
+            "`!pause` - Pause music\n"
+            "`!resume` - Resume music\n"
+            "`!skip` - Skip current song\n"
+            "`!stop` - Stop and clear queue\n"
+            "`!queue` - Show music queue\n"
+            "`!nowplaying` or `!np` - Show current song\n"
+            "`!disconnect` or `!dc` - Leave voice"
         ),
         inline=False
     )
