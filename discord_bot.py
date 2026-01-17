@@ -64,6 +64,11 @@ music_queues = {}  # Format: {guild_id: deque([song_info, ...])}
 now_playing = {}   # Format: {guild_id: song_info}
 
 # YouTube downloader options
+# Check if cookies file exists
+COOKIES_FILE = 'youtube_cookies.txt'
+if os.path.exists(COOKIES_FILE):
+    logger.info(f"Found YouTube cookies file: {COOKIES_FILE}")
+
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
     'extractaudio': True,
@@ -78,6 +83,16 @@ YDL_OPTIONS = {
     'no_warnings': True,
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'extractor_args': {
+        'youtube': {
+            'skip': ['hls', 'dash', 'translated_subs'],
+            'player_skip': ['js', 'configs', 'webpage'],
+            'player_client': ['android', 'web'],
+        }
+    },
+    'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
+    'age_limit': None,
 }
 
 FFMPEG_OPTIONS = {
@@ -447,14 +462,28 @@ async def join_voice(ctx):
     guild_id = str(ctx.guild.id)
     
     try:
-        if guild_id in voice_clients and voice_clients[guild_id].is_connected():
-            await ctx.reply("ℹ️ Already in a voice channel! Use `!leave` first.")
-            return
+        # Clean up stale connections
+        if guild_id in voice_clients:
+            if voice_clients[guild_id].is_connected():
+                await ctx.reply("ℹ️ Already in a voice channel! Use `!leave` first.")
+                return
+            else:
+                # Remove stale connection
+                del voice_clients[guild_id]
         
         voice_client = await channel.connect()
         voice_clients[guild_id] = voice_client
         await ctx.reply(f"✅ Joined {channel.name}! Say something and I'll transcribe it.")
         
+    except discord.errors.ClientException as e:
+        # Handle "Already connected" error
+        if guild_id in voice_clients:
+            try:
+                await voice_clients[guild_id].disconnect()
+            except:
+                pass
+            del voice_clients[guild_id]
+        await ctx.reply("⚠️ Found stale connection, cleaned up. Please try `!join` again.")
     except Exception as e:
         logger.error(f"Voice join error: {str(e)}")
         await ctx.reply(f"Sorry, couldn't join voice channel: {str(e)}")
@@ -632,12 +661,26 @@ async def play_music(ctx, *, query: str = None):
     
     guild_id = str(ctx.guild.id)
     
+    # Clean up stale connections first
+    if guild_id in voice_clients and not voice_clients[guild_id].is_connected():
+        del voice_clients[guild_id]
+    
     # Join voice channel if not connected
-    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+    if guild_id not in voice_clients:
         try:
             channel = ctx.author.voice.channel
             voice_client = await channel.connect()
             voice_clients[guild_id] = voice_client
+        except discord.errors.ClientException as e:
+            # Handle stale connection
+            if guild_id in voice_clients:
+                try:
+                    await voice_clients[guild_id].disconnect()
+                except:
+                    pass
+                del voice_clients[guild_id]
+            await ctx.reply("⚠️ Found stale connection. Please try `!play` again.")
+            return
         except Exception as e:
             await ctx.reply(f"❌ Couldn't join voice channel: {str(e)}")
             return
@@ -687,9 +730,18 @@ async def play_music(ctx, *, query: str = None):
                 
                 await ctx.reply(embed=embed)
                 
+        except yt_dlp.utils.DownloadError as e:
+            error_msg = str(e)
+            if 'Sign in to confirm' in error_msg or 'bot' in error_msg.lower():
+                await ctx.reply("❌ YouTube is blocking the request. This happens due to YouTube's bot detection.\n\n**Workaround:** Try using a different video or search query. YouTube's restrictions vary by video.")
+            else:
+                await ctx.reply(f"❌ YouTube error: {error_msg[:200]}")
         except Exception as e:
             logger.error(f"Error adding song: {str(e)}")
-            await ctx.reply(f"❌ Error: {str(e)}")
+            if 'Sign in' in str(e) or 'bot' in str(e).lower():
+                await ctx.reply("❌ YouTube blocked the request. Try:\n• Using a different search term\n• Trying again in a few minutes\n• Using a direct video URL instead of search")
+            else:
+                await ctx.reply(f"❌ Error: {str(e)[:200]}")
 
 @bot.command(name='pause')
 async def pause_music(ctx):
