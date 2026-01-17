@@ -14,9 +14,9 @@ import io
 from pydub import AudioSegment
 import speech_recognition as sr
 import tempfile
-import yt_dlp
 from collections import deque
 import re
+from spotdl import Spotdl
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -100,46 +100,50 @@ def get_music_queue(guild_id):
         music_queues[guild_id] = deque()
     return music_queues[guild_id]
 
+# Initialize SpotDL (no credentials needed for YouTube)
+spotdl = Spotdl()
+logger.info("SpotDL initialized successfully")
+
 async def youtube_search(query: str, max_results: int = 5) -> list[dict]:
-    """Search YouTube using yt-dlp (g4f-inspired approach)"""
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': True,
-        'skip_download': True,
-        'ignoreerrors': True,
-    }
-    search_url = f"ytsearch{max_results}:{query}"
-    
+    """Search YouTube/Spotify using SpotDL (avoids bot detection)"""
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(search_url, download=False)
+        # SpotDL search returns Song objects
+        songs = await asyncio.to_thread(spotdl.search, [query])
         
         results = []
-        for entry in info.get('entries', []):
-            if entry:  # Skip None entries
-                results.append({
-                    'title': entry.get('title', 'Unknown'),
-                    'url': f"https://www.youtube.com/watch?v={entry.get('id')}",
-                    'id': entry.get('id'),
-                    'duration': entry.get('duration', 0),
-                })
+        for song in songs[:max_results]:
+            results.append({
+                'title': song.name,
+                'url': song.url,
+                'id': song.song_id,
+                'duration': int(song.duration),
+                'artist': ', '.join(song.artists) if song.artists else 'Unknown'
+            })
         return results
     except Exception as e:
-        logger.error(f"YouTube search error: {str(e)}")
+        logger.error(f"Search error: {str(e)}")
         return []
 
-# YouTube downloader options (simplified for streaming)
-YDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'quiet': True,
-    'no_warnings': True,
-    'extract_flat': False,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'source_address': '0.0.0.0',
-}
+async def get_audio_stream(url: str) -> str:
+    """Get direct audio stream URL from SpotDL"""
+    try:
+        songs = await asyncio.to_thread(spotdl.search, [url])
+        if not songs:
+            raise Exception("Song not found")
+        
+        song = songs[0]
+        # Get audio from YouTube using pytube (part of spotdl)
+        audio_provider = spotdl.audio_provider
+        results = await asyncio.to_thread(audio_provider.search, song.name)
+        
+        if results:
+            return results[0].watch_url
+        raise Exception("No audio stream found")
+    except Exception as e:
+        logger.error(f"Stream error: {str(e)}")
+        raise
 
+# FFmpeg options for audio playback
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn'
@@ -693,17 +697,16 @@ async def play_next(ctx):
     voice_client = get_voice_client(ctx.guild)
     if not voice_client:
         return
+    
     song_info = queue.popleft()
     now_playing[guild_id] = song_info
     
     try:
-        # Extract audio URL
-        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-            info = ydl.extract_info(song_info['url'], download=False)
-            url2 = info['url']
+        # Get audio stream URL using SpotDL
+        stream_url = await get_audio_stream(song_info['url'])
         
         # Create audio source
-        source = discord.FFmpegPCMAudio(url2, **FFMPEG_OPTIONS)
+        source = discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS)
         
         # Play audio
         def after_playing(error):
@@ -780,42 +783,23 @@ async def play_music(ctx, *, query: str = None):
     
     async with ctx.typing():
         try:
-            # Determine if it's a URL or search query
-            is_url = query.startswith('http://') or query.startswith('https://')
+            # Search using SpotDL (works for URLs and search queries)
+            search_results = await youtube_search(query, max_results=1)
             
-            if is_url:
-                # Direct URL - extract info
-                with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-                    info = ydl.extract_info(query, download=False)
-                    
-                    # Handle playlist
-                    if 'entries' in info:
-                        info = info['entries'][0]
-                    
-                    song_info = {
-                        'url': info.get('webpage_url', query),
-                        'title': info.get('title', 'Unknown'),
-                        'duration': f"{info.get('duration', 0) // 60}:{info.get('duration', 0) % 60:02d}",
-                        'thumbnail': info.get('thumbnail'),
-                        'requester': ctx.author.mention
-                    }
-            else:
-                # Search query - use improved search
-                search_results = await youtube_search(query, max_results=1)
-                
-                if not search_results:
-                    await ctx.reply("❌ No results found! Try a different search term.")
-                    return
-                
-                result = search_results[0]
-                duration = result['duration']
-                song_info = {
-                    'url': result['url'],
-                    'title': result['title'],
-                    'duration': f"{duration // 60}:{duration % 60:02d}" if duration else "Unknown",
-                    'thumbnail': f"https://img.youtube.com/vi/{result['id']}/maxresdefault.jpg",
-                    'requester': ctx.author.mention
-                }
+            if not search_results:
+                await ctx.reply("❌ No results found! Try a different search term.")
+                return
+            
+            result = search_results[0]
+            duration = result['duration']
+            song_info = {
+                'url': result['url'],
+                'title': result['title'],
+                'duration': f"{duration // 60}:{duration % 60:02d}" if duration else "Unknown",
+                'thumbnail': f"https://img.youtube.com/vi/{result['id']}/maxresdefault.jpg",
+                'artist': result.get('artist', 'Unknown'),
+                'requester': ctx.author.mention
+            }
             
             queue = get_music_queue(guild_id)
             voice_client = voice_clients[guild_id]
