@@ -103,6 +103,7 @@ docker run -e DISCORD_BOT_TOKEN=your_token discord-ai-bot
 | Command | Description | Example |
 |---------|-------------|---------|
 | `!play <url/query>` | Play music from YouTube | `!play Imagine Dragons Believer` |
+| `!search <query>` or `!ytsearch` | Search YouTube (shows top 5) | `!search Believer` |
 | `!pause` | Pause current song | `!pause` |
 | `!resume` | Resume paused song | `!resume` |
 | `!skip` | Skip to next song | `!skip` |

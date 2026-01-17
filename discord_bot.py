@@ -59,40 +59,85 @@ image_models = {}
 TTS_VOICE = "en-IN-NeerjaNeural"  # Indian female voice
 voice_clients = {}  # Store voice connections per guild
 
+def get_voice_client(guild):
+    """Get the actual voice client for a guild - robust check"""
+    # First check Discord's internal state
+    if guild.voice_client and guild.voice_client.is_connected():
+        return guild.voice_client
+    
+    # Check our cache
+    guild_id = str(guild.id)
+    if guild_id in voice_clients:
+        vc = voice_clients[guild_id]
+        if vc.is_connected():
+            return vc
+        else:
+            # Clean up stale entry
+            del voice_clients[guild_id]
+    
+    return None
+
+def cleanup_voice_client(guild_id):
+    """Clean up voice client entry"""
+    guild_id = str(guild_id)
+    if guild_id in voice_clients:
+        try:
+            if voice_clients[guild_id].is_connected():
+                # Don't delete if actually connected
+                return
+        except:
+            pass
+        del voice_clients[guild_id]
+
 # Music system
 music_queues = {}  # Format: {guild_id: deque([song_info, ...])}
 now_playing = {}   # Format: {guild_id: song_info}
 
-# YouTube downloader options
-# Check if cookies file exists
-COOKIES_FILE = 'youtube_cookies.txt'
-if os.path.exists(COOKIES_FILE):
-    logger.info(f"Found YouTube cookies file: {COOKIES_FILE}")
+def get_music_queue(guild_id):
+    """Get or create music queue for a guild"""
+    guild_id = str(guild_id)
+    if guild_id not in music_queues:
+        music_queues[guild_id] = deque()
+    return music_queues[guild_id]
 
+async def youtube_search(query: str, max_results: int = 5) -> list[dict]:
+    """Search YouTube using yt-dlp (g4f-inspired approach)"""
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True,
+        'skip_download': True,
+        'ignoreerrors': True,
+    }
+    search_url = f"ytsearch{max_results}:{query}"
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(search_url, download=False)
+        
+        results = []
+        for entry in info.get('entries', []):
+            if entry:  # Skip None entries
+                results.append({
+                    'title': entry.get('title', 'Unknown'),
+                    'url': f"https://www.youtube.com/watch?v={entry.get('id')}",
+                    'id': entry.get('id'),
+                    'duration': entry.get('duration', 0),
+                })
+        return results
+    except Exception as e:
+        logger.error(f"YouTube search error: {str(e)}")
+        return []
+
+# YouTube downloader options (simplified for streaming)
 YDL_OPTIONS = {
     'format': 'bestaudio/best',
-    'extractaudio': True,
-    'audioformat': 'mp3',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
-    'noplaylist': False,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'ytsearch',
+    'extract_flat': False,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
     'source_address': '0.0.0.0',
-    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'extractor_args': {
-        'youtube': {
-            'skip': ['hls', 'dash', 'translated_subs'],
-            'player_skip': ['js', 'configs', 'webpage'],
-            'player_client': ['android', 'web'],
-        }
-    },
-    'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
-    'age_limit': None,
 }
 
 FFMPEG_OPTIONS = {
@@ -134,6 +179,31 @@ async def on_ready():
     logger.info(f'Bot is in {len(bot.guilds)} guilds')
     # Start the keep-alive task
     bot.loop.create_task(keep_alive())
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    """Track voice state changes to keep our state in sync"""
+    # Only track bot's own voice state
+    if member.id != bot.user.id:
+        return
+    
+    guild_id = str(member.guild.id)
+    
+    # Bot left or was disconnected from voice
+    if before.channel and not after.channel:
+        logger.info(f"Bot left voice channel in guild {guild_id}")
+        cleanup_voice_client(guild_id)
+        
+        # Clear music queue when disconnected
+        if guild_id in music_queues:
+            music_queues[guild_id].clear()
+    
+    # Bot joined voice channel
+    elif not before.channel and after.channel:
+        logger.info(f"Bot joined voice channel in guild {guild_id}")
+        # Sync our cache with actual state
+        if member.guild.voice_client:
+            voice_clients[guild_id] = member.guild.voice_client
 
 async def keep_alive():
     """Self-ping to keep Render instance awake"""
@@ -461,57 +531,73 @@ async def join_voice(ctx):
     channel = ctx.author.voice.channel
     guild_id = str(ctx.guild.id)
     
+    # Check if already connected using robust check
+    existing_vc = get_voice_client(ctx.guild)
+    if existing_vc:
+        if existing_vc.channel.id == channel.id:
+            await ctx.reply(f"ℹ️ Already in {channel.name}!")
+        else:
+            await ctx.reply(f"ℹ️ Already in {existing_vc.channel.name}! Use `!leave` first.")
+        return
+    
     try:
-        # Clean up stale connections
-        if guild_id in voice_clients:
-            if voice_clients[guild_id].is_connected():
-                await ctx.reply("ℹ️ Already in a voice channel! Use `!leave` first.")
-                return
-            else:
-                # Remove stale connection
-                del voice_clients[guild_id]
-        
         voice_client = await channel.connect()
         voice_clients[guild_id] = voice_client
-        await ctx.reply(f"✅ Joined {channel.name}! Say something and I'll transcribe it.")
+        await ctx.reply(f"✅ Joined {channel.name}!")
         
-    except discord.errors.ClientException as e:
-        # Handle "Already connected" error
-        if guild_id in voice_clients:
-            try:
-                await voice_clients[guild_id].disconnect()
-            except:
-                pass
-            del voice_clients[guild_id]
-        await ctx.reply("⚠️ Found stale connection, cleaned up. Please try `!join` again.")
+    except discord.errors.ClientException:
+        # Stale connection detected - force cleanup and retry
+        cleanup_voice_client(guild_id)
+        try:
+            # Force disconnect from Discord's perspective
+            if ctx.guild.voice_client:
+                await ctx.guild.voice_client.disconnect(force=True)
+            await asyncio.sleep(0.5)  # Brief delay for cleanup
+            
+            voice_client = await channel.connect()
+            voice_clients[guild_id] = voice_client
+            await ctx.reply(f"✅ Joined {channel.name}! (Cleaned up stale connection)")
+        except Exception as retry_error:
+            logger.error(f"Voice join retry failed: {str(retry_error)}")
+            await ctx.reply(f"❌ Failed to join after cleanup: {str(retry_error)}")
     except Exception as e:
         logger.error(f"Voice join error: {str(e)}")
-        await ctx.reply(f"Sorry, couldn't join voice channel: {str(e)}")
+        await ctx.reply(f"❌ Couldn't join voice channel: {str(e)}")
 
 @bot.command(name='leave')
 async def leave_voice(ctx):
     """Leave the voice channel"""
     guild_id = str(ctx.guild.id)
     
-    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+    # Use robust check
+    voice_client = get_voice_client(ctx.guild)
+    
+    if not voice_client:
         await ctx.reply("❌ I'm not in a voice channel!")
         return
     
     try:
-        await voice_clients[guild_id].disconnect()
-        del voice_clients[guild_id]
+        # Clear music queue
+        if guild_id in music_queues:
+            music_queues[guild_id].clear()
+        
+        await voice_client.disconnect()
+        cleanup_voice_client(guild_id)
         await ctx.reply("👋 Left the voice channel!")
         
     except Exception as e:
         logger.error(f"Voice leave error: {str(e)}")
-        await ctx.reply(f"Sorry, couldn't leave voice channel: {str(e)}")
+        # Force cleanup even if disconnect fails
+        cleanup_voice_client(guild_id)
+        await ctx.reply(f"⚠️ Left with errors: {str(e)}")
 
 @bot.command(name='listen')
 async def listen_command(ctx, duration: int = 5):
     """Listen and transcribe voice (duration in seconds, max 30)"""
     guild_id = str(ctx.guild.id)
     
-    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+    voice_client = get_voice_client(ctx.guild)
+    if not voice_client:
         await ctx.reply("❌ Bot must be in voice channel! Use `!join` first.")
         return
     
@@ -604,10 +690,9 @@ async def play_next(ctx):
         now_playing.pop(guild_id, None)
         return
     
-    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+    voice_client = get_voice_client(ctx.guild)
+    if not voice_client:
         return
-    
-    voice_client = voice_clients[guild_id]
     song_info = queue.popleft()
     now_playing[guild_id] = song_info
     
@@ -660,50 +745,75 @@ async def play_music(ctx, *, query: str = None):
         return
     
     guild_id = str(ctx.guild.id)
+    channel = ctx.author.voice.channel
     
-    # Clean up stale connections first
-    if guild_id in voice_clients and not voice_clients[guild_id].is_connected():
-        del voice_clients[guild_id]
+    # Get or connect to voice using robust check
+    voice_client = get_voice_client(ctx.guild)
     
-    # Join voice channel if not connected
-    if guild_id not in voice_clients:
+    if not voice_client:
         try:
-            channel = ctx.author.voice.channel
             voice_client = await channel.connect()
             voice_clients[guild_id] = voice_client
-        except discord.errors.ClientException as e:
-            # Handle stale connection
-            if guild_id in voice_clients:
-                try:
-                    await voice_clients[guild_id].disconnect()
-                except:
-                    pass
-                del voice_clients[guild_id]
-            await ctx.reply("⚠️ Found stale connection. Please try `!play` again.")
-            return
+        except discord.errors.ClientException:
+            # Stale connection detected - force cleanup and retry
+            cleanup_voice_client(guild_id)
+            try:
+                if ctx.guild.voice_client:
+                    await ctx.guild.voice_client.disconnect(force=True)
+                await asyncio.sleep(0.5)
+                
+                voice_client = await channel.connect()
+                voice_clients[guild_id] = voice_client
+            except Exception as retry_error:
+                logger.error(f"Play connection retry failed: {str(retry_error)}")
+                await ctx.reply(f"❌ Failed to join voice: {str(retry_error)}")
+                return
         except Exception as e:
             await ctx.reply(f"❌ Couldn't join voice channel: {str(e)}")
             return
     
+    # Verify voice client is valid
+    if not voice_client.is_connected():
+        cleanup_voice_client(guild_id)
+        await ctx.reply("❌ Voice connection lost! Please try again.")
+        return
+    
     async with ctx.typing():
         try:
-            # Search or get video info
-            with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
-                # If it's not a URL, search for it
-                if not query.startswith('http'):
-                    query = f"ytsearch:{query}"
+            # Determine if it's a URL or search query
+            is_url = query.startswith('http://') or query.startswith('https://')
+            
+            if is_url:
+                # Direct URL - extract info
+                with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+                    info = ydl.extract_info(query, download=False)
+                    
+                    # Handle playlist
+                    if 'entries' in info:
+                        info = info['entries'][0]
+                    
+                    song_info = {
+                        'url': info.get('webpage_url', query),
+                        'title': info.get('title', 'Unknown'),
+                        'duration': f"{info.get('duration', 0) // 60}:{info.get('duration', 0) % 60:02d}",
+                        'thumbnail': info.get('thumbnail'),
+                        'requester': ctx.author.mention
+                    }
+            else:
+                # Search query - use improved search
+                search_results = await youtube_search(query, max_results=1)
                 
-                info = ydl.extract_info(query, download=False)
+                if not search_results:
+                    await ctx.reply("❌ No results found! Try a different search term.")
+                    return
                 
-                # Handle playlist
-                if 'entries' in info:
-                    info = info['entries'][0]
-                
+                result = search_results[0]
+                duration = result['duration']
                 song_info = {
-                    'url': info['webpage_url'],
-                    'title': info['title'],
-                    'duration': f"{info.get('duration', 0) // 60}:{info.get('duration', 0) % 60:02d}",
-                    'thumbnail': info.get('thumbnail'),
+                    'url': result['url'],
+                    'title': result['title'],
+                    'duration': f"{duration // 60}:{duration % 60:02d}" if duration else "Unknown",
+                    'thumbnail': f"https://img.youtube.com/vi/{result['id']}/maxresdefault.jpg",
                     'requester': ctx.author.mention
                 }
             
@@ -730,29 +840,55 @@ async def play_music(ctx, *, query: str = None):
                 
                 await ctx.reply(embed=embed)
                 
-        except yt_dlp.utils.DownloadError as e:
-            error_msg = str(e)
-            if 'Sign in to confirm' in error_msg or 'bot' in error_msg.lower():
-                await ctx.reply("❌ YouTube is blocking the request. This happens due to YouTube's bot detection.\n\n**Workaround:** Try using a different video or search query. YouTube's restrictions vary by video.")
-            else:
-                await ctx.reply(f"❌ YouTube error: {error_msg[:200]}")
         except Exception as e:
             logger.error(f"Error adding song: {str(e)}")
-            if 'Sign in' in str(e) or 'bot' in str(e).lower():
-                await ctx.reply("❌ YouTube blocked the request. Try:\n• Using a different search term\n• Trying again in a few minutes\n• Using a direct video URL instead of search")
-            else:
-                await ctx.reply(f"❌ Error: {str(e)[:200]}")
+            await ctx.reply(f"❌ Error: {str(e)[:150]}")
+
+@bot.command(name='search', aliases=['ytsearch'])
+async def search_youtube(ctx, *, query: str = None):
+    """Search YouTube and show top 5 results"""
+    if not query:
+        await ctx.reply("Please provide a search query!\nExample: `!search Imagine Dragons`")
+        return
+    
+    async with ctx.typing():
+        try:
+            results = await youtube_search(query, max_results=5)
+            
+            if not results:
+                await ctx.reply("❌ No results found!")
+                return
+            
+            embed = discord.Embed(
+                title=f"🔍 YouTube Search: {query}",
+                color=discord.Color.purple()
+            )
+            
+            for i, result in enumerate(results, 1):
+                duration = result['duration']
+                duration_str = f"{duration // 60}:{duration % 60:02d}" if duration else "Live"
+                embed.add_field(
+                    name=f"{i}. {result['title'][:80]}",
+                    value=f"[▶️ Play]({result['url']}) • Duration: {duration_str}",
+                    inline=False
+                )
+            
+            embed.set_footer(text="Use !play <song name> to play any song")
+            await ctx.reply(embed=embed)
+            
+        except Exception as e:
+            logger.error(f"Search error: {str(e)}")
+            await ctx.reply(f"❌ Search failed: {str(e)[:100]}")
 
 @bot.command(name='pause')
 async def pause_music(ctx):
     """Pause currently playing music"""
     guild_id = str(ctx.guild.id)
     
-    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+    voice_client = get_voice_client(ctx.guild)
+    if not voice_client:
         await ctx.reply("❌ Bot is not in a voice channel!")
         return
-    
-    voice_client = voice_clients[guild_id]
     
     if voice_client.is_playing():
         voice_client.pause()
@@ -765,11 +901,10 @@ async def resume_music(ctx):
     """Resume paused music"""
     guild_id = str(ctx.guild.id)
     
-    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+    voice_client = get_voice_client(ctx.guild)
+    if not voice_client:
         await ctx.reply("❌ Bot is not in a voice channel!")
         return
-    
-    voice_client = voice_clients[guild_id]
     
     if voice_client.is_paused():
         voice_client.resume()
@@ -782,11 +917,10 @@ async def skip_music(ctx):
     """Skip current song"""
     guild_id = str(ctx.guild.id)
     
-    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+    voice_client = get_voice_client(ctx.guild)
+    if not voice_client:
         await ctx.reply("❌ Bot is not in a voice channel!")
         return
-    
-    voice_client = voice_clients[guild_id]
     
     if voice_client.is_playing():
         voice_client.stop()
@@ -799,11 +933,10 @@ async def stop_music(ctx):
     """Stop music and clear queue"""
     guild_id = str(ctx.guild.id)
     
-    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+    voice_client = get_voice_client(ctx.guild)
+    if not voice_client:
         await ctx.reply("❌ Bot is not in a voice channel!")
         return
-    
-    voice_client = voice_clients[guild_id]
     
     # Clear queue
     if guild_id in music_queues:
@@ -887,7 +1020,8 @@ async def disconnect_music(ctx):
     """Disconnect bot from voice channel"""
     guild_id = str(ctx.guild.id)
     
-    if guild_id not in voice_clients or not voice_clients[guild_id].is_connected():
+    voice_client = get_voice_client(ctx.guild)
+    if not voice_client:
         await ctx.reply("❌ Bot is not in a voice channel!")
         return
     
@@ -896,8 +1030,8 @@ async def disconnect_music(ctx):
         music_queues[guild_id].clear()
     now_playing.pop(guild_id, None)
     
-    await voice_clients[guild_id].disconnect()
-    del voice_clients[guild_id]
+    await voice_client.disconnect()
+    cleanup_voice_client(guild_id)
     
     await ctx.reply("👋 Disconnected from voice channel")
 
