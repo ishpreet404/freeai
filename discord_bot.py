@@ -35,6 +35,75 @@ AI_PREFIX = "?"
 # Initialize g4f client
 g4f_client = Client()
 
+# --- g4f API capability info (runtime check) ---
+G4F_API_INFO = {}
+
+def _check_g4f_api():
+    """Populate G4F_API_INFO with available client capabilities."""
+    info = {
+        'module_has_provider': hasattr(g4f, 'Provider'),
+        'client_has_chat': hasattr(g4f_client, 'chat') and hasattr(getattr(g4f_client, 'chat'), 'completions'),
+        'chat_create_callable': callable(getattr(getattr(g4f_client, 'chat'), 'completions', None)) if hasattr(g4f_client, 'chat') else False,
+        'client_has_images': hasattr(g4f_client, 'images') and callable(getattr(getattr(g4f_client, 'images'), 'generate', None)),
+        'provider_list': []
+    }
+    try:
+        if hasattr(g4f, 'Provider'):
+            info['provider_list'] = [n for n in dir(g4f.Provider) if not n.startswith('_')]
+    except Exception:
+        info['provider_list'] = []
+    return info
+
+G4F_API_INFO.update(_check_g4f_api())
+
+
+def safe_extract_ai_text(response):
+    """Safely extract text from various g4f response shapes.
+
+    Handles object-like and dict-like responses, and falls back to str(response).
+    """
+    try:
+        if response is None:
+            return None
+        # Object-style: response.choices[0].message.content
+        if hasattr(response, 'choices') and response.choices:
+            choice = response.choices[0]
+            # attribute access
+            try:
+                if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                    return choice.message.content
+            except Exception:
+                pass
+            # dict-like access
+            try:
+                if isinstance(choice, dict):
+                    if 'message' in choice and isinstance(choice['message'], dict) and 'content' in choice['message']:
+                        return choice['message']['content']
+                    if 'text' in choice:
+                        return choice['text']
+            except Exception:
+                pass
+        # Simple attribute
+        if hasattr(response, 'content'):
+            return response.content
+        # dict-style top-level
+        if isinstance(response, dict):
+            if 'choices' in response and isinstance(response['choices'], list) and response['choices']:
+                c = response['choices'][0]
+                if isinstance(c, dict):
+                    if 'message' in c and isinstance(c['message'], dict) and 'content' in c['message']:
+                        return c['message']['content']
+                    if 'text' in c:
+                        return c['text']
+            if 'text' in response:
+                return response['text']
+        # Last resort
+        return str(response)
+    except Exception as e:
+        logger.debug(f"safe_extract_ai_text failed: {e}")
+        return str(response)
+
+
 # Initialize TMDB
 tmdb = TMDb()
 tmdb.api_key = 'ae4bd1b6fce2a5648671bfc171d15ba4'
@@ -254,7 +323,7 @@ async def handle_chat(message, prompt=None):
                 messages=conversation_history[user_id]
             )
             
-            ai_response = response.choices[0].message.content
+            ai_response = safe_extract_ai_text(response)
             
             # Add AI response to history
             conversation_history[user_id].append({
@@ -308,7 +377,7 @@ async def handle_image_analysis(message, image_url, prompt):
                 messages=conversation_history[user_id]
             )
             
-            ai_response = response.choices[0].message.content
+            ai_response = safe_extract_ai_text(response)
             
             # Add AI response to history
             conversation_history[user_id].append({
@@ -400,138 +469,107 @@ async def imagine_command(ctx, *, prompt: str = None):
         status_msg = await ctx.reply(f"🎨 Generating images with **{AVAILABLE_IMAGE_MODELS.get(selected_model, selected_model)}**\n> _{prompt}_\n\n⏳ Trying multiple providers...")
         
         try:
-            # Import providers - PollinationsImage is the main image provider
-            from g4f.Provider import PollinationsImage, PollinationsAI
-            
-            # For image generation, g4f uses PollinationsImage provider which supports multiple models
-            # We'll try generating with PollinationsImage twice for redundancy
-            providers_to_try = [PollinationsImage, PollinationsImage]
-            
-            # Function to generate image with a specific provider
-            def generate_with_provider(provider):
-                try:
-                    provider_name = provider.__name__
-                    logger.info(f"Trying provider: {provider_name} for model: {selected_model}")
-                    response = g4f_client.images.generate(
-                        model=selected_model,
-                        prompt=prompt,
-                        provider=provider
-                    )
-                    logger.info(f"Success with {provider_name}")
-                    return (provider_name, response)
-                except Exception as e:
-                    logger.warning(f"Provider {provider.__name__} failed: {str(e)}")
-                    return (provider.__name__, None)
-            
-            # Try all providers in parallel
-            tasks = [asyncio.get_event_loop().run_in_executor(None, generate_with_provider, provider) 
-                     for provider in providers_to_try]
-            results = await asyncio.gather(*tasks)
-            
-            # Filter successful results
-            successful_results = [(name, resp) for name, resp in results if resp is not None]
-            
-            if not successful_results:
-                await status_msg.edit(content=f"❌ All providers failed for **{selected_model}** model.\n\n💡 Try another model: `!listimagemodels`")
-                return
-            
-            # Update status
-            provider_count = len(successful_results)
-            await status_msg.edit(content=f"✅ Generated {provider_count} image(s) from {provider_count} provider(s)!\n⏳ Downloading...")
-            # Update status
-            provider_count = len(successful_results)
-            await status_msg.edit(content=f"✅ Generated {provider_count} image(s) from {provider_count} provider(s)!\n⏳ Downloading...")
-                
-            # Process each successful response
-            images_to_send = []
-            
-            for provider_name, response in successful_results:
-                # Get image URL or data from response
-                image_url = None
-                image_data = None
-                
-                # Try different response formats
-                logger.info(f"Parsing response from {provider_name}, type: {type(response)}")
-                
-                if hasattr(response, 'data') and response.data:
-                    if len(response.data) > 0:
-                        first_item = response.data[0]
-                        if hasattr(first_item, 'url'):
-                            image_url = first_item.url
-                        elif isinstance(first_item, str):
-                            image_url = first_item
-                        elif hasattr(first_item, 'b64_json'):
-                            import base64
-                            image_data = base64.b64decode(first_item.b64_json)
-                elif isinstance(response, str):
-                    image_url = response
-                elif isinstance(response, bytes):
-                    image_data = response
-                    
-                # If we have image data directly
-                if image_data:
-                    size_mb = len(image_data) / (1024 * 1024)
-                    logger.info(f"Image data from {provider_name}: {size_mb:.2f}MB")
-                    
-                    if len(image_data) > MAX_FILE_SIZE:
-                        image_data = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_data)
-                    
-                    images_to_send.append((provider_name, image_data))
-                    
-                # If we have a URL, download it
-                elif image_url:
+            # First, try direct Pollinations image endpoint (fast, doesn't rely on g4f internals)
+            from urllib.parse import quote_plus
+
+            def generate_via_pollinations(prompt_text: str, model_name: str = None):
+                # Prefer the gen endpoint for better results, fallback to simple image endpoint
+                encoded = quote_plus(prompt_text)
+                urls = [
+                    f"https://gen.pollinations.ai/image/{encoded}",
+                    f"https://image.pollinations.ai/prompt/{encoded}"
+                ]
+                for url in urls:
                     try:
-                        def download_image():
-                            resp = requests.get(image_url, timeout=30)
-                            resp.raise_for_status()
+                        resp = requests.get(url, timeout=30, allow_redirects=True)
+                        resp.raise_for_status()
+                        # If we received image bytes, return them
+                        content_type = resp.headers.get('content-type', '')
+                        if content_type.startswith('image/') or resp.content:
                             return resp.content
-                        
-                        image_bytes = await asyncio.get_event_loop().run_in_executor(None, download_image)
-                        logger.info(f"Downloaded {len(image_bytes)} bytes from {provider_name}")
-                        
-                        # Check size and compress if needed
-                        if len(image_bytes) > MAX_FILE_SIZE:
-                            image_bytes = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_bytes)
-                        
-                        images_to_send.append((provider_name, image_bytes))
-                    except Exception as download_error:
-                        logger.error(f"Download error from {provider_name}: {str(download_error)}")
+                    except Exception:
                         continue
-            
-            # Send all images
+                return None
+
+            images_to_send = []
+
+            # Try direct Pollinations first
+            try:
+                image_bytes = await asyncio.get_event_loop().run_in_executor(None, generate_via_pollinations, prompt, selected_model)
+                if image_bytes:
+                    if len(image_bytes) > MAX_FILE_SIZE:
+                        image_bytes = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_bytes)
+                    images_to_send.append(("Pollinations", image_bytes))
+            except Exception as e:
+                logger.warning(f"Pollinations direct call failed: {e}")
+
+            # If Pollinations failed, try g4f client image APIs if available
             if not images_to_send:
-                await status_msg.edit(content=f"❌ Could not process any images.\n\n💡 Try another model: `!listimagemodels`")
+                # Attempt to use g4f client if it exposes an images interface
+                try:
+                    # Try the high-level images.generate if available
+                    if hasattr(g4f_client, 'images') and hasattr(g4f_client.images, 'generate'):
+                        def call_g4f_images():
+                            return g4f_client.images.generate(model=selected_model, prompt=prompt)
+                        resp = await asyncio.get_event_loop().run_in_executor(None, call_g4f_images)
+
+                        # Parse response for URL/bytes
+                        image_url = None
+                        image_data = None
+                        if hasattr(resp, 'data') and resp.data:
+                            first_item = resp.data[0]
+                            if hasattr(first_item, 'url'):
+                                image_url = first_item.url
+                            elif isinstance(first_item, str):
+                                image_url = first_item
+                            elif hasattr(first_item, 'b64_json'):
+                                import base64
+                                image_data = base64.b64decode(first_item.b64_json)
+                        elif isinstance(resp, str):
+                            image_url = resp
+                        elif isinstance(resp, bytes):
+                            image_data = resp
+
+                        if image_data:
+                            if len(image_data) > MAX_FILE_SIZE:
+                                image_data = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_data)
+                            images_to_send.append(("g4f_images", image_data))
+                        elif image_url:
+                            # download
+                            def download_image():
+                                r = requests.get(image_url, timeout=30)
+                                r.raise_for_status()
+                                return r.content
+                            image_bytes = await asyncio.get_event_loop().run_in_executor(None, download_image)
+                            if len(image_bytes) > MAX_FILE_SIZE:
+                                image_bytes = await asyncio.get_event_loop().run_in_executor(None, compress_image, image_bytes)
+                            images_to_send.append(("g4f_images", image_bytes))
+                except Exception as e:
+                    logger.warning(f"g4f client image generation failed: {e}")
+
+            # If still no images, give up
+            if not images_to_send:
+                await status_msg.edit(content=f"❌ Image generation failed for **{selected_model}**. All fallbacks failed.\n\n💡 Try another model: `!listimagemodels`")
                 return
-            
-            # Create embeds and files for all images
+
+            # Send results (support single or multiple)
             if len(images_to_send) == 1:
-                # Single image - send with embed
                 provider_name, image_data = images_to_send[0]
                 file = discord.File(io.BytesIO(image_data), filename="generated_image.jpg")
-                embed = discord.Embed(
-                    title="🎨 Generated Image",
-                    description=f"> {prompt}",
-                    color=discord.Color.green()
-                )
+                embed = discord.Embed(title="🎨 Generated Image", description=f"> {prompt}", color=discord.Color.green())
                 embed.set_image(url="attachment://generated_image.jpg")
                 embed.set_footer(text=f"Requested by {ctx.author.display_name} • Model: {selected_model} • Provider: {provider_name}")
                 await ctx.send(embed=embed, file=file)
             else:
-                # Multiple images - send all at once
                 files = []
                 for i, (provider_name, image_data) in enumerate(images_to_send, 1):
                     files.append(discord.File(io.BytesIO(image_data), filename=f"image_{i}_{provider_name}.jpg"))
-                
-                embed = discord.Embed(
-                    title=f"🎨 Generated {len(images_to_send)} Images",
-                    description=f"> {prompt}\n\n**Providers:** {', '.join([name for name, _ in images_to_send])}",
-                    color=discord.Color.green()
-                )
+                embed = discord.Embed(title=f"🎨 Generated {len(images_to_send)} Images", description=f"> {prompt}", color=discord.Color.green())
                 embed.set_footer(text=f"Requested by {ctx.author.display_name} • Model: {selected_model}")
                 await ctx.send(embed=embed, files=files)
-            
+
             await status_msg.delete()
-                    
+            return
         except Exception as gen_error:
             logger.error(f"Generation wrapper error: {str(gen_error)}", exc_info=True)
             try:
@@ -543,6 +581,20 @@ async def imagine_command(ctx, *, prompt: str = None):
         logger.error(f"Image command error: {str(e)}", exc_info=True)
         await ctx.reply(f"❌ Command error: {str(e)}\n\n💡 Use `!listimagemodels` to see available models")
 
+
+
+@bot.command(name='g4fstatus')
+async def g4f_status(ctx):
+    """Return runtime information about the g4f API available to the bot."""
+    try:
+        info_lines = [f"{k}: {v}" for k, v in G4F_API_INFO.items() if k != 'provider_list']
+        # show provider count and first 8 providers
+        providers = G4F_API_INFO.get('provider_list', [])
+        info_lines.append(f"providers_count: {len(providers)}")
+        info_lines.append(f"providers_sample: {', '.join(providers[:8])}")
+        await ctx.reply("\n".join(info_lines))
+    except Exception as e:
+        await ctx.reply(f"Failed to get g4f status: {e}")
 
 
 @bot.command(name='ask')
@@ -578,7 +630,7 @@ async def ask_command(ctx, *, question: str = None):
                 messages=conversation_history[user_id]
             )
             
-            ai_response = response.choices[0].message.content
+            ai_response = safe_extract_ai_text(response)
             
             # Add AI response to history
             conversation_history[user_id].append({

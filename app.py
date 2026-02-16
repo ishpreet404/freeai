@@ -18,6 +18,37 @@ logger = logging.getLogger(__name__)
 # Initialize g4f client
 client = Client()
 
+# Basic runtime checks for g4f API surface
+G4F_OK = {
+    'has_chat': hasattr(client, 'chat') and hasattr(getattr(client, 'chat'), 'completions'),
+    'has_images': hasattr(client, 'images') and callable(getattr(getattr(client, 'images'), 'generate', None)),
+    'provider_module': hasattr(g4f, 'Provider')
+}
+
+
+def _safe_extract_text(resp):
+    try:
+        if resp is None:
+            return None
+        if hasattr(resp, 'choices') and resp.choices:
+            c = resp.choices[0]
+            if hasattr(c, 'message') and hasattr(c.message, 'content'):
+                return c.message.content
+            if isinstance(c, dict) and 'text' in c:
+                return c['text']
+        if isinstance(resp, dict) and 'choices' in resp and resp['choices']:
+            c = resp['choices'][0]
+            if isinstance(c, dict):
+                if 'message' in c and isinstance(c['message'], dict) and 'content' in c['message']:
+                    return c['message']['content']
+                if 'text' in c:
+                    return c['text']
+        if hasattr(resp, 'content'):
+            return resp.content
+        return str(resp)
+    except Exception:
+        return str(resp)
+
 # Thread pool for async operations
 executor = ThreadPoolExecutor(max_workers=10)
 
@@ -75,7 +106,7 @@ def chat():
         # Generate response
         response = client.chat.completions.create(**kwargs)
         
-        response_text = response.choices[0].message.content
+        response_text = _safe_extract_text(response)
         
         return jsonify({
             'success': True,
@@ -124,8 +155,19 @@ def generate_image():
         # Generate image
         response = client.images.generate(**kwargs)
         
-        # Get image URL or data
-        image_url = response.data[0].url if hasattr(response.data[0], 'url') else None
+        # Get image URL or data (robust)
+        image_url = None
+        try:
+            if hasattr(response, 'data') and response.data:
+                first = response.data[0]
+                if hasattr(first, 'url'):
+                    image_url = first.url
+                elif isinstance(first, str):
+                    image_url = first
+            elif isinstance(response, str):
+                image_url = response
+        except Exception:
+            image_url = None
         
         if not image_url:
             return jsonify({
@@ -167,6 +209,20 @@ def list_providers():
             'success': False,
             'error': str(e)
         }), 500
+
+
+@app.route('/g4f-check', methods=['GET'])
+def g4f_check():
+    """Quick runtime check of g4f client capabilities."""
+    try:
+        return jsonify({
+            'success': True,
+            'g4f_ok': G4F_OK,
+            'providers_available': [n for n in dir(g4f.Provider) if not n.startswith('_')] if hasattr(g4f, 'Provider') else []
+        })
+    except Exception as e:
+        logger.error(f"g4f-check error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
